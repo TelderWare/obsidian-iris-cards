@@ -43,7 +43,7 @@ export class CardStore {
   async createCard(
     cardsFolder: string,
     body: string,
-    source?: { file: TFile; module?: string; date?: string },
+    source?: { file: TFile; module?: string; date?: string; aiSelected?: boolean },
   ): Promise<TFile> {
     await this.ensureFolderExists(cardsFolder);
     const uid = String(Date.now());
@@ -58,6 +58,7 @@ export class CardStore {
       }
       if (source?.module != null) fm["module"] = source.module;
       if (source?.date != null) fm["date"] = source.date;
+      if (source?.aiSelected) fm["ai-selected"] = true;
     });
 
     return newFile;

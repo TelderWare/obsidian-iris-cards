@@ -14,7 +14,7 @@ import type { IrisCardsSettings } from "./settings";
 import { ReviewView, VIEW_TYPE_REVIEW } from "./review-view";
 import { countDueFromCache, getDueCards } from "./leitner";
 import { CardStore } from "./card-store";
-import { generateQA, generateVariant, generateCloze, generateMultipleChoice, encodeMC, generateSolveEquation, encodeSolveEquation, generateOrderSteps, encodeOrderSteps, generateCorrectMistake, generateExplainWhy, generateTrueFalse, generateAssembleEquation, encodeAssembleEquation, classifyEligibility, standardizeQuestion, parseQABlock, TYPE_PRIORITY, type QAVariant, type ExerciseType } from "./claude";
+import { generateQA, generateVariant, generateCloze, generateMultipleChoice, encodeMC, generateSolveEquation, encodeSolveEquation, generateOrderSteps, encodeOrderSteps, generateCorrectMistake, generateExplainWhy, generateTrueFalse, generateAssembleEquation, encodeAssembleEquation, classifyEligibility, standardizeQuestion, parseQABlock, extractFactsFromNote, TYPE_PRIORITY, type QAVariant, type ExerciseType } from "./claude";
 
 function encryptSecret(key: string): string {
   if (!key) return "";
@@ -113,6 +113,12 @@ export default class IrisCardsPlugin extends Plugin {
       id: "open-review",
       name: "Review due cards",
       callback: () => this.activateReviewView(),
+    });
+
+    this.addCommand({
+      id: "generate-quiz",
+      name: "Generate quiz",
+      callback: () => this.generateQuiz(),
     });
 
     // Ribbon icon
@@ -539,6 +545,127 @@ export default class IrisCardsPlugin extends Plugin {
     await leaf.openFile(newFile);
 
     new Notice(`Created: ${noteTitle}`);
+  }
+
+  // ─── Generate Quiz ─────────────────────────────────────────
+
+  private buildContextLineForLine(sourceFile: TFile, line: number): string {
+    const cache = this.app.metadataCache.getFileCache(sourceFile);
+    const fm = cache?.frontmatter;
+    const noteTitle = fm?.["displayTitle"] ?? fm?.["title"] ?? sourceFile.basename;
+
+    const parts: string[] = [noteTitle];
+
+    const headings = cache?.headings;
+    if (headings && headings.length > 0) {
+      const ancestors: { level: number; heading: string }[] = [];
+      for (const h of headings) {
+        if (h.position.start.line >= line) break;
+        while (ancestors.length > 0 && ancestors[ancestors.length - 1].level >= h.level) {
+          ancestors.pop();
+        }
+        ancestors.push({ level: h.level, heading: h.heading });
+      }
+      for (const a of ancestors) {
+        parts.push(a.heading);
+      }
+    }
+
+    return `(Context: ${parts.join(", ")})`;
+  }
+
+  private async generateQuiz(): Promise<void> {
+    const apiKey = this.settings.anthropicApiKey;
+    if (!apiKey) {
+      new Notice("Set your Anthropic API key in Iris Cards settings.");
+      return;
+    }
+
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view?.file) {
+      new Notice("Open a note to generate a quiz from.");
+      return;
+    }
+    const sourceFile = view.file;
+
+    const rawContent = await this.app.vault.read(sourceFile);
+    // Strip frontmatter
+    const content = rawContent.replace(/^---\n[\s\S]*?\n---\n?/, "");
+
+    new Notice("Extracting facts\u2026");
+    let facts: string[];
+    try {
+      facts = await extractFactsFromNote(content, apiKey, this.settings.claudeModel);
+    } catch (e) {
+      new Notice(`Fact extraction failed: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+
+    if (facts.length === 0) {
+      new Notice("No facts found in this note.");
+      return;
+    }
+
+    const cardsFolder = this.settings.cardsFolder.trim() || "Iris Cards";
+    const srcFm = this.app.metadataCache.getFileCache(sourceFile)?.frontmatter;
+    const lines = rawContent.split("\n");
+
+    // Load existing card bodies for duplicate detection
+    const existingBodies = new Set<string>();
+    const folder = this.app.vault.getAbstractFileByPath(cardsFolder);
+    if (folder && folder instanceof TFolder) {
+      for (const child of folder.children) {
+        if (child instanceof TFile && child.extension === "md") {
+          const c = await this.app.vault.read(child);
+          existingBodies.add(c.toLowerCase().replace(/\s+/g, " ").trim());
+        }
+      }
+    }
+
+    new Notice(`Found ${facts.length} facts. Creating cards\u2026`);
+    let created = 0;
+    let skipped = 0;
+
+    for (const fact of facts) {
+      // Duplicate check: see if any existing card already contains this fact
+      const normFact = stripMarkdown(fact).toLowerCase().replace(/\s+/g, " ").trim();
+      if ([...existingBodies].some(b => b.includes(normFact))) {
+        skipped++;
+        continue;
+      }
+
+      // Find line number of this fact in the raw content
+      let factLine = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(fact.substring(0, Math.min(40, fact.length)))) {
+          factLine = i;
+          break;
+        }
+      }
+
+      const contextLine = this.buildContextLineForLine(sourceFile, factLine);
+      const selection = stripMarkdown(fact);
+      const cardBody = contextLine ? `${contextLine}\n\n${selection}` : selection;
+
+      const newFile = await this.cardStore.createCard(cardsFolder, cardBody, {
+        file: sourceFile,
+        module: srcFm?.["module"] ?? undefined,
+        date: srcFm?.["date"] ?? undefined,
+        aiSelected: true,
+      });
+
+      this.pregenerateQA(newFile, apiKey);
+      created++;
+    }
+
+    const ref = this.app.metadataCache.on("resolved", () => {
+      this.app.metadataCache.offref(ref);
+      this.updateBadge();
+    });
+
+    const parts = [`Created ${created} cards from ${sourceFile.basename}`];
+    if (skipped > 0) parts.push(`(${skipped} duplicates skipped)`);
+    new Notice(parts.join(" "));
   }
 
   // ─── Memorize Selection ─────────────────────────────────────

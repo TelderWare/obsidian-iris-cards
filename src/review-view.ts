@@ -201,7 +201,7 @@ export class ReviewView extends ItemView {
     this.resizeObs?.disconnect();
     this.resizeObs = new ResizeObserver((entries) => {
       for (const e of entries) {
-        container.toggleClass("iris-compact", e.contentRect.width < 350);
+        container.toggleClass("iris-compact", e.contentRect.height < 700);
       }
     });
     this.resizeObs.observe(container);
