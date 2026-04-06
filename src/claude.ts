@@ -6,6 +6,10 @@ import { evaluateFormula } from "./safe-math";
 let _app: App | undefined;
 export function setRelayApp(app: App): void { _app = app; }
 
+/** Relay priority for the current batch (0-10, higher = first). Default 5. */
+let _relayPriority: number | undefined;
+export function setRelayPriority(p: number | undefined): void { _relayPriority = p; }
+
 // ─── Shared API Helpers ─────────────────────────────────────────
 
 const API_URL = "https://api.anthropic.com/v1/messages";
@@ -22,10 +26,10 @@ function apiHeaders(apiKey: string) {
   };
 }
 
-async function apiRequest(apiKey: string, body: object): Promise<Record<string, unknown>> {
+async function apiRequest(apiKey: string, body: object, relayPriority?: number): Promise<Record<string, unknown>> {
   // Route through Iris Relay when available
   const relay = (_app as any)?.irisRelay;
-  if (relay) return relay.request(body);
+  if (relay) return relay.request(body, relayPriority ?? _relayPriority);
 
   try {
     const response = await requestUrl({
@@ -149,6 +153,7 @@ export interface QAVariant {
   lastReviewed: string | null;
   suspended: boolean;
   recordMs: number | null;
+  difficulty: number | null;
 }
 
 export interface ParsedQA {
@@ -180,11 +185,12 @@ export function parseQABlock(fullContent: string): ParsedQA {
   let reviewed: string | null = null;
   let suspended = false;
   let recordMs: number | null = null;
+  let difficulty: number | null = null;
 
   const exerciseSet = new Set<string>(EXERCISE_TYPES);
 
   const pushVariant = () => {
-    if (q && a) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, lastReviewed: reviewed, suspended, recordMs });
+    if (q && a) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, lastReviewed: reviewed, suspended, recordMs, difficulty });
   };
 
   for (const line of lines) {
@@ -199,6 +205,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
       reviewed = null;
       suspended = false;
       recordMs = null;
+      difficulty = null;
     } else if (line.startsWith("A: ")) {
       a = line.slice(3).trim();
     } else if (line.startsWith("Type: ")) {
@@ -213,6 +220,9 @@ export function parseQABlock(fullContent: string): ParsedQA {
     } else if (line.startsWith("Record: ")) {
       const val = parseInt(line.slice(8).trim(), 10);
       if (!isNaN(val)) recordMs = val;
+    } else if (line.startsWith("Difficulty: ")) {
+      const val = parseFloat(line.slice(12).trim());
+      if (!isNaN(val)) difficulty = val;
     } else if (q && !a && line.length > 0) {
       // Continuation of a multi-line question (e.g. MC options)
       q += "\n" + line;
@@ -241,6 +251,9 @@ export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[
     }
     if (v.recordMs != null) {
       entry += `\nRecord: ${v.recordMs}`;
+    }
+    if (v.difficulty != null) {
+      entry += `\nDifficulty: ${v.difficulty}`;
     }
     return entry;
   });

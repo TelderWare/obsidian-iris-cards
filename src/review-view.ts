@@ -328,23 +328,27 @@ export class ReviewView extends ItemView {
       return;
     }
 
-    // In infinite mode, prefer variants not yet shown this session
+    // Pick variant: prefer harder questions (higher difficulty), then oldest-reviewed
+    const pickHardest = (pool: QAVariant[]): QAVariant =>
+      pool.reduce((best, v) => {
+        const bD = best.difficulty ?? 0.5;
+        const vD = v.difficulty ?? 0.5;
+        if (vD > bD) return v;
+        if (vD < bD) return best;
+        // Equal difficulty: prefer never-reviewed, then oldest-reviewed
+        if (best.lastReviewed === null) return best;
+        if (v.lastReviewed === null) return v;
+        return v.lastReviewed < best.lastReviewed ? v : best;
+      }, pool[0]);
+
     let variant: QAVariant;
     if (this.infiniteMode) {
       const unseen = active.filter(v => !this.shownVariants.has(cardFile.path + "\0" + v.question));
       const pool = unseen.length > 0 ? unseen : active;
-      variant = pool.reduce((oldest, v) => {
-        if (oldest.lastReviewed === null) return oldest;
-        if (v.lastReviewed === null) return v;
-        return v.lastReviewed < oldest.lastReviewed ? v : oldest;
-      }, pool[0]);
+      variant = pickHardest(pool);
       this.shownVariants.add(cardFile.path + "\0" + variant.question);
     } else {
-      variant = active.reduce((oldest, v) => {
-        if (oldest.lastReviewed === null) return oldest;
-        if (v.lastReviewed === null) return v;
-        return v.lastReviewed < oldest.lastReviewed ? v : oldest;
-      }, active[0]);
+      variant = pickHardest(active);
     }
 
     // Create card
@@ -974,10 +978,14 @@ export class ReviewView extends ItemView {
       const parsed = parseQABlock(content);
       const active = parsed.variants.filter(v => !v.suspended);
       if (active.length === 0) continue;
-      const variant = active.reduce((oldest, v) => {
-        if (oldest.lastReviewed === null) return oldest;
+      const variant = active.reduce((best, v) => {
+        const bD = best.difficulty ?? 0.5;
+        const vD = v.difficulty ?? 0.5;
+        if (vD > bD) return v;
+        if (vD < bD) return best;
+        if (best.lastReviewed === null) return best;
         if (v.lastReviewed === null) return v;
-        return v.lastReviewed < oldest.lastReviewed ? v : oldest;
+        return v.lastReviewed < best.lastReviewed ? v : best;
       }, active[0]);
       const preview = body.createDiv({ cls: "iris-card iris-card-preview", attr: { inert: "" } });
       await this.renderVariantInto(preview, file, variant, apiKey);

@@ -14,7 +14,7 @@ import type { IrisCardsSettings } from "./settings";
 import { ReviewView, VIEW_TYPE_REVIEW } from "./review-view";
 import { countDueFromCache, getDueCards } from "./leitner";
 import { CardStore } from "./card-store";
-import { generateQA, generateVariant, generateCloze, generateMultipleChoice, encodeMC, generateSolveEquation, encodeSolveEquation, generateOrderSteps, encodeOrderSteps, generateCorrectMistake, generateExplainWhy, generateTrueFalse, generateAssembleEquation, encodeAssembleEquation, classifyEligibility, standardizeQuestion, parseQABlock, extractFactsFromNote, TYPE_PRIORITY, type QAVariant, type ExerciseType, setRelayApp } from "./claude";
+import { generateQA, generateVariant, generateCloze, generateMultipleChoice, encodeMC, generateSolveEquation, encodeSolveEquation, generateOrderSteps, encodeOrderSteps, generateCorrectMistake, generateExplainWhy, generateTrueFalse, generateAssembleEquation, encodeAssembleEquation, classifyEligibility, standardizeQuestion, parseQABlock, extractFactsFromNote, TYPE_PRIORITY, type QAVariant, type ExerciseType, setRelayApp, setRelayPriority } from "./claude";
 
 function encryptSecret(key: string): string {
   if (!key) return "";
@@ -299,14 +299,23 @@ export default class IrisCardsPlugin extends Plugin {
     this.drainPregenQueue(apiKey);
   }
 
+  /** Map local pregeneration priority (0=background, 1=normal, 2=user-triggered)
+   *  to relay priority (0-10 scale, lower = processed first). */
+  private static toRelayPriority(localPriority: number): number {
+    if (localPriority >= 2) return 1;  // user is actively reviewing
+    if (localPriority <= 0) return 8;  // background bulk
+    return 5;                          // normal pregeneration
+  }
+
   private drainPregenQueue(apiKey: string): void {
     while (this.pregenRunning < this.PREGEN_CONCURRENCY && this.pregenQueue.length > 0) {
-      const { card } = this.pregenQueue.shift()!;
+      const { card, priority: localPriority } = this.pregenQueue.shift()!;
       this.pregenQueued.delete(card.path);
       if (this.qaCache.has(card.path)) continue;
       this.pregenRunning++;
       const promise = (async () => {
         try {
+          setRelayPriority(IrisCardsPlugin.toRelayPriority(localPriority));
           const content = await this.app.vault.read(card);
           const parsed = parseQABlock(content);
 
@@ -342,6 +351,7 @@ export default class IrisCardsPlugin extends Plugin {
           await this.cardStore.updateSuspendedFlag(card, variants);
           return variants;
         } finally {
+          setRelayPriority(undefined);
           this.pregenRunning--;
           this.drainPregenQueue(apiKey);
         }
@@ -369,6 +379,7 @@ export default class IrisCardsPlugin extends Plugin {
       lastReviewed: null,
       suspended: false,
       recordMs: null,
+      difficulty: null,
     });
 
     // Table-driven generation: each entry returns { q, a } pairs

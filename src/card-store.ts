@@ -75,11 +75,21 @@ export class CardStore {
     userAnswer?: string,
     elapsedMs?: number,
   ): Promise<void> {
+    // Read variant difficulty before updating frontmatter so the stability
+    // calculation uses the reviewed variant's difficulty, not the file-level one.
+    let variantD: number | undefined;
+    if (questionShown) {
+      const content = await this.app.vault.cachedRead(file);
+      const parsed = parseQABlock(content);
+      const v = parsed.variants.find(v => v.question === questionShown);
+      if (v) variantD = v.difficulty ?? undefined;
+    }
+
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       const S = getStability(fm);
-      const D = getDifficulty(fm);
+      const D = variantD ?? getDifficulty(fm);
       fm["stability"] = updateStability(S, correct, D, elapsedMs);
-      fm["difficulty"] = updateDifficulty(D, correct);
+      fm["difficulty"] = updateDifficulty(getDifficulty(fm), correct);
       delete fm["box"];
       fm["last-reviewed"] = new Date().toISOString();
       fm["repetitions"] = (fm["repetitions"] ?? 0) + 1;
@@ -91,7 +101,12 @@ export class CardStore {
         const idx = variants.findIndex(v => v.question === questionShown);
         if (idx === -1) return;
         const v = variants[idx];
-        const updated: QAVariant = { ...v, lastReviewed: new Date().toISOString() };
+        const vD = v.difficulty ?? 0.5;
+        const updated: QAVariant = {
+          ...v,
+          lastReviewed: new Date().toISOString(),
+          difficulty: updateDifficulty(vD, correct),
+        };
 
         if (correct && userAnswer) {
           const norm = normalizeAnswer(userAnswer);
