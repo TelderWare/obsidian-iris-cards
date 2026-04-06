@@ -20,6 +20,7 @@ export interface IrisCardsSettings {
   soundFeedback: boolean;
   flashFeedback: boolean;
   badgePosition: BadgePosition;
+  desiredRetention: number;
   // Internal
   hotkeysConfigured: boolean;
 }
@@ -38,6 +39,7 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   soundFeedback: true,
   flashFeedback: true,
   badgePosition: "bottom-left",
+  desiredRetention: 0.9,
   hotkeysConfigured: false,
 };
 
@@ -104,6 +106,9 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         "bottom-left": "Bottom left",
         off: "Disabled",
       }).setValue(s.badgePosition).onChange(async (v) => { s.badgePosition = v as any; await save(); this.plugin.updateBadge(); }));
+
+    new Setting(containerEl).setName("Desired retention").setDesc("Target probability of remembering a card when it comes due (0.70–0.97). Higher = more frequent reviews.").addSlider(sl =>
+      sl.setLimits(0.70, 0.97, 0.01).setValue(s.desiredRetention).setDynamicTooltip().onChange(async (v) => { s.desiredRetention = v; await save(); this.plugin.updateBadge(); }));
 
     new Setting(containerEl).setName("Claude model").setDesc("Model used for generating review questions.").addDropdown(d =>
       d.addOption("claude-opus-4-6", "Claude Opus 4.6")

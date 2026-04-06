@@ -40,6 +40,10 @@
   flex-shrink: 0;
 }
 
+.iris-compact > .iris-header {
+  display: none;
+}
+
 .iris-header-left,
 .iris-header-right {
   flex: 1;

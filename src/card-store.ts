@@ -1,6 +1,6 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import { parseQABlock, stripQABlock, buildQABlock, type QAVariant, type ExerciseType } from "./claude";
-import { getStability, updateStability, getDueCards, S_INITIAL } from "./leitner";
+import { getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog } from "./leitner";
 
 function normalizeAnswer(s: string): string {
   return s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
@@ -76,10 +76,13 @@ export class CardStore {
   ): Promise<void> {
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       const S = getStability(fm);
-      fm["stability"] = updateStability(S, correct);
+      const D = getDifficulty(fm);
+      fm["stability"] = updateStability(S, correct, D, elapsedMs);
+      fm["difficulty"] = updateDifficulty(D, correct);
       delete fm["box"];
       fm["last-reviewed"] = new Date().toISOString();
       fm["repetitions"] = (fm["repetitions"] ?? 0) + 1;
+      appendReviewLog(fm, buildLogEntry(correct, elapsedMs));
     });
 
     if (questionShown) {

@@ -226,7 +226,7 @@ export default class IrisCardsPlugin extends Plugin {
   updateBadge(): void {
     if (!this.ribbonIconEl) return;
     const pos = this.settings.badgePosition;
-    const count = countDueFromCache(this.app, this.settings.cardsFolder);
+    const count = countDueFromCache(this.app, this.settings.cardsFolder, 0, this.settings.desiredRetention);
     if (pos !== "off" && count > 0) {
       if (!this.badgeEl) {
         this.badgeEl = this.ribbonIconEl.createSpan({ cls: "iris-badge" });
@@ -278,7 +278,7 @@ export default class IrisCardsPlugin extends Plugin {
   async pregenerateAll(): Promise<void> {
     const apiKey = this.settings.anthropicApiKey;
     if (!apiKey) return;
-    const cards = await getDueCards(this.app, this.settings.cardsFolder);
+    const cards = await getDueCards(this.app, this.settings.cardsFolder, 0, undefined, this.settings.desiredRetention);
     for (const card of cards) {
       this.enqueuePregen(card, 0); // background: low priority
     }

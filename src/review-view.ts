@@ -1,6 +1,6 @@
 import { ItemView, TFile, WorkspaceLeaf, MarkdownRenderer, setIcon } from "obsidian";
 import type IrisCardsPlugin from "./main";
-import { getDueCards, getAllCards, getModules, updateStability, getStability } from "./leitner";
+import { getDueCards, getAllCards, getModules, updateStability, getStability, getDifficulty, updateDifficulty } from "./leitner";
 import { markAnswer, appealAnswer, parseClozeTerms, occludeCloze, decodeMC, decodeSolveEquation, randomizeKnowns, evaluateFormula, roundToSigFigs, checkNumericalAnswer, decodeOrderSteps, shuffleArray, parseQABlock, type QAVariant } from "./claude";
 
 export const VIEW_TYPE_REVIEW = "iris-cards-review";
@@ -24,6 +24,7 @@ export class ReviewView extends ItemView {
   private currentVariant: QAVariant | null = null;
   private scrollAnimId = 0;
   private renderStateCache = new Map<string, Record<string, unknown>>();
+  private resizeObs: ResizeObserver | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: IrisCardsPlugin) {
     super(leaf);
@@ -53,6 +54,8 @@ export class ReviewView extends ItemView {
 
   async onClose(): Promise<void> {
     this.clearDoneCheck();
+    this.resizeObs?.disconnect();
+    this.resizeObs = null;
     this.audioCtx?.close();
     this.audioCtx = null;
     this.layoutReady = false;
@@ -79,7 +82,7 @@ export class ReviewView extends ItemView {
   private async loadDueCards(): Promise<void> {
     this.dueCards = this.infiniteMode
       ? await getAllCards(this.app, this.plugin.settings.cardsFolder, this.moduleFilter.size > 0 ? this.moduleFilter : undefined)
-      : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined);
+      : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
     if (this.dueCards.length === 0) {
       this.renderDoneCard();
       return;
@@ -193,6 +196,16 @@ export class ReviewView extends ItemView {
 
     // Scrollable body
     this.scrollBody = container.createDiv({ cls: "iris-scroll-body" });
+
+    // Compact mode: hide header when the tab is narrow
+    this.resizeObs?.disconnect();
+    this.resizeObs = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        container.toggleClass("iris-compact", e.contentRect.width < 350);
+      }
+    });
+    this.resizeObs.observe(container);
+
     this.layoutReady = true;
   }
 
@@ -233,7 +246,7 @@ export class ReviewView extends ItemView {
 
     // Poll for newly due cards
     this.doneCheckInterval = window.setInterval(async () => {
-      const cards = await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined);
+      const cards = await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
       if (cards.length > 0) {
         this.clearDoneCheck();
         this.dueCards = cards;
@@ -576,7 +589,9 @@ export class ReviewView extends ItemView {
     const apiKey = this.plugin.settings.anthropicApiKey;
     if (!apiKey) return;
 
-    const preStability = getStability(this.app.metadataCache.getFileCache(cardFile)?.frontmatter);
+    const preFm = this.app.metadataCache.getFileCache(cardFile)?.frontmatter;
+    const preStability = getStability(preFm);
+    const preDifficulty = getDifficulty(preFm);
 
     const appealBtn = card.createEl("button", {
       cls: "iris-card-icon iris-appeal-icon",
@@ -599,7 +614,8 @@ export class ReviewView extends ItemView {
         if (overturned) {
           this.playFeedback(true);
           await this.app.fileManager.processFrontMatter(cardFile, (fm) => {
-            fm["stability"] = updateStability(preStability, true);
+            fm["stability"] = updateStability(preStability, true, preDifficulty);
+            fm["difficulty"] = updateDifficulty(preDifficulty, true);
             delete fm["box"];
           });
           await this.plugin.cardStore.addAcceptedAnswer(cardFile, variant.question, userAnswer);
