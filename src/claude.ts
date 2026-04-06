@@ -1,5 +1,10 @@
-import { requestUrl } from "obsidian";
+import { App, requestUrl } from "obsidian";
 import { evaluateFormula } from "./safe-math";
+
+// ─── Relay integration ─────────────────────────────────────────
+
+let _app: App | undefined;
+export function setRelayApp(app: App): void { _app = app; }
 
 // ─── Shared API Helpers ─────────────────────────────────────────
 
@@ -18,6 +23,10 @@ function apiHeaders(apiKey: string) {
 }
 
 async function apiRequest(apiKey: string, body: object): Promise<Record<string, unknown>> {
+  // Route through Iris Relay when available
+  const relay = (_app as any)?.irisRelay;
+  if (relay) return relay.request(body);
+
   try {
     const response = await requestUrl({
       url: API_URL,
@@ -600,7 +609,10 @@ export function encodeOrderSteps(os: OrderStepsResult): { question: string; answ
 
 /** Decode stored Order Steps fields. */
 export function decodeOrderSteps(question: string, answer: string): OrderStepsResult {
-  return { title: question, steps: JSON.parse(answer) };
+  let steps: string[];
+  try { steps = JSON.parse(answer); } catch { throw new Error("Invalid order-steps JSON"); }
+  if (!Array.isArray(steps)) throw new Error("Order-steps answer is not an array");
+  return { title: question, steps };
 }
 
 /** Shuffle an array (Fisher-Yates), returns a new array. */
@@ -710,8 +722,9 @@ export function encodeSolveEquation(se: SolveEquationResult): { question: string
 
 /** Decode stored Solve Equation fields back into structured data. */
 export function decodeSolveEquation(question: string, answer: string): SolveEquationResult {
-  const parsed = JSON.parse(question);
-  return { ...parsed, formula: answer };
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(question); } catch { throw new Error("Invalid solve-equation JSON"); }
+  return { ...parsed, formula: answer } as SolveEquationResult;
 }
 
 /** Round a number to N significant figures. */

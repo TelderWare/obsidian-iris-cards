@@ -21,6 +21,7 @@ export interface IrisCardsSettings {
   flashFeedback: boolean;
   badgePosition: BadgePosition;
   desiredRetention: number;
+  linkedNoteField: string;
   // Internal
   hotkeysConfigured: boolean;
 }
@@ -40,6 +41,7 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   flashFeedback: true,
   badgePosition: "bottom-left",
   desiredRetention: 0.9,
+  linkedNoteField: "video",
   hotkeysConfigured: false,
 };
 
@@ -57,13 +59,16 @@ export class IrisCardsSettingTab extends PluginSettingTab {
     const s = this.plugin.settings;
     const save = () => this.plugin.saveSettings();
 
-    const addToggle = (name: string, desc: string, key: keyof IrisCardsSettings, onChange?: () => void) =>
-      new Setting(containerEl).setName(name).setDesc(desc).addToggle(t =>
-        t.setValue(s[key] as boolean).onChange(async (v) => { (s as any)[key] = v; await save(); onChange?.(); }));
+    type BoolKey = { [K in keyof IrisCardsSettings]: IrisCardsSettings[K] extends boolean ? K : never }[keyof IrisCardsSettings];
+    type StrKey = { [K in keyof IrisCardsSettings]: IrisCardsSettings[K] extends string ? K : never }[keyof IrisCardsSettings];
 
-    const addText = (name: string, desc: string, key: keyof IrisCardsSettings, placeholder: string) =>
+    const addToggle = (name: string, desc: string, key: BoolKey, onChange?: () => void) =>
+      new Setting(containerEl).setName(name).setDesc(desc).addToggle(t =>
+        t.setValue(s[key]).onChange(async (v) => { (s as unknown as Record<string, unknown>)[key] = v; await save(); onChange?.(); }));
+
+    const addText = (name: string, desc: string, key: StrKey, placeholder: string) =>
       new Setting(containerEl).setName(name).setDesc(desc).addText(t =>
-        t.setPlaceholder(placeholder).setValue(s[key] as string).onChange(async (v) => { (s as any)[key] = v.trim(); await save(); }));
+        t.setPlaceholder(placeholder).setValue(s[key]).onChange(async (v) => { (s as unknown as Record<string, unknown>)[key] = v.trim(); await save(); }));
 
     // ─── With selection ─────────────────────────────────────
     containerEl.createEl("h3", { text: "Create note (with selection)" });
@@ -105,7 +110,7 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         "bottom-right": "Bottom right",
         "bottom-left": "Bottom left",
         off: "Disabled",
-      }).setValue(s.badgePosition).onChange(async (v) => { s.badgePosition = v as any; await save(); this.plugin.updateBadge(); }));
+      }).setValue(s.badgePosition).onChange(async (v) => { s.badgePosition = v as BadgePosition; await save(); this.plugin.updateBadge(); }));
 
     new Setting(containerEl).setName("Desired retention").setDesc("Target probability of remembering a card when it comes due (0.70–0.97). Higher = more frequent reviews.").addSlider(sl =>
       sl.setLimits(0.70, 0.97, 0.01).setValue(s.desiredRetention).setDynamicTooltip().onChange(async (v) => { s.desiredRetention = v; await save(); this.plugin.updateBadge(); }));
@@ -115,5 +120,7 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         .addOption("claude-sonnet-4-6", "Claude Sonnet 4.6")
         .addOption("claude-haiku-4-5-20251001", "Claude Haiku 4.5")
         .setValue(s.claudeModel).onChange(async (v) => { s.claudeModel = v; await save(); }));
+
+    addText("Linked note field", "Frontmatter key whose value points to a linked note for quiz generation (e.g. video, transcript).", "linkedNoteField", "video");
   }
 }

@@ -329,17 +329,17 @@ input.iris-answer-input:focus {
 
 .iris-flash-correct {
   animation: iris-flash-edge-anim 0.5s ease-out forwards;
-  --flash-color: rgba(0, 200, 80, 0.2);
+  --flash-color: rgba(0, 200, 80, 0.45);
 }
 
 .iris-flash-incorrect {
   animation: iris-flash-edge-anim 0.5s ease-out forwards;
-  --flash-color: rgba(220, 40, 40, 0.2);
+  --flash-color: rgba(220, 40, 40, 0.4);
 }
 
 .iris-flash-record {
   animation: iris-flash-edge-anim 0.5s ease-out forwards;
-  --flash-color: rgba(60, 130, 255, 0.25);
+  --flash-color: rgba(60, 130, 255, 0.45);
 }
 
 .iris-record-icon {
@@ -349,7 +349,7 @@ input.iris-answer-input:focus {
   transform: translate(-50%, -50%);
   color: rgba(60, 130, 255, 0.4);
   pointer-events: none;
-  animation: iris-record-icon-anim 1.5s ease-out forwards;
+  animation: iris-record-icon-anim 0.5s ease-out forwards;
 }
 
 .iris-record-icon svg {

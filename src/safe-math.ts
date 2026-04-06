@@ -228,6 +228,7 @@ class Parser {
 }
 
 export function evaluateFormula(formula: string, values: Record<string, number>): number {
+  if (!formula || !formula.trim()) throw new Error("Empty formula");
   const allowedVars = new Set(Object.keys(values));
   const tokens = tokenize(formula, allowedVars);
   return new Parser(tokens, values).parse();

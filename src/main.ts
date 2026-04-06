@@ -14,7 +14,7 @@ import type { IrisCardsSettings } from "./settings";
 import { ReviewView, VIEW_TYPE_REVIEW } from "./review-view";
 import { countDueFromCache, getDueCards } from "./leitner";
 import { CardStore } from "./card-store";
-import { generateQA, generateVariant, generateCloze, generateMultipleChoice, encodeMC, generateSolveEquation, encodeSolveEquation, generateOrderSteps, encodeOrderSteps, generateCorrectMistake, generateExplainWhy, generateTrueFalse, generateAssembleEquation, encodeAssembleEquation, classifyEligibility, standardizeQuestion, parseQABlock, extractFactsFromNote, TYPE_PRIORITY, type QAVariant, type ExerciseType } from "./claude";
+import { generateQA, generateVariant, generateCloze, generateMultipleChoice, encodeMC, generateSolveEquation, encodeSolveEquation, generateOrderSteps, encodeOrderSteps, generateCorrectMistake, generateExplainWhy, generateTrueFalse, generateAssembleEquation, encodeAssembleEquation, classifyEligibility, standardizeQuestion, parseQABlock, extractFactsFromNote, TYPE_PRIORITY, type QAVariant, type ExerciseType, setRelayApp } from "./claude";
 
 function encryptSecret(key: string): string {
   if (!key) return "";
@@ -87,6 +87,7 @@ export default class IrisCardsPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    setRelayApp(this.app);
     this.cardStore = new CardStore(this.app);
     await this.configureHotkeys();
 
@@ -119,6 +120,12 @@ export default class IrisCardsPlugin extends Plugin {
       id: "generate-quiz",
       name: "Generate quiz",
       callback: () => this.generateQuiz(),
+    });
+
+    this.addCommand({
+      id: "generate-quiz-linked",
+      name: "Generate quiz from linked note",
+      callback: () => this.generateQuizFromLinkedNote(),
     });
 
     // Ribbon icon
@@ -211,6 +218,7 @@ export default class IrisCardsPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    this.settings.desiredRetention = Math.max(0.70, Math.min(0.97, this.settings.desiredRetention));
     if (this.settings.anthropicApiKey) {
       this.settings.anthropicApiKey = decryptSecret(this.settings.anthropicApiKey);
     }
@@ -586,9 +594,49 @@ export default class IrisCardsPlugin extends Plugin {
       new Notice("Open a note to generate a quiz from.");
       return;
     }
+
+    await this.runQuizGeneration(view.file, view.file, apiKey);
+  }
+
+  private async generateQuizFromLinkedNote(): Promise<void> {
+    const apiKey = this.settings.anthropicApiKey;
+    if (!apiKey) {
+      new Notice("Set your Anthropic API key in Iris Cards settings.");
+      return;
+    }
+
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view?.file) {
+      new Notice("Open a note to generate a quiz from.");
+      return;
+    }
     const sourceFile = view.file;
 
-    const rawContent = await this.app.vault.read(sourceFile);
+    const fieldKey = this.settings.linkedNoteField.trim();
+    if (!fieldKey) {
+      new Notice("Set the linked note field in Iris Cards settings.");
+      return;
+    }
+
+    const fm = this.app.metadataCache.getFileCache(sourceFile)?.frontmatter;
+    const raw = fm?.[fieldKey];
+    if (!raw) {
+      new Notice(`No "${fieldKey}" field found in frontmatter.`);
+      return;
+    }
+
+    const linkPath = String(raw).replace(/^\[\[|\]\]$/g, "");
+    const linkedFile = this.app.metadataCache.getFirstLinkpathDest(linkPath, sourceFile.path);
+    if (!linkedFile) {
+      new Notice(`Linked note not found: ${linkPath}`);
+      return;
+    }
+
+    await this.runQuizGeneration(sourceFile, linkedFile, apiKey);
+  }
+
+  private async runQuizGeneration(sourceFile: TFile, contentFile: TFile, apiKey: string): Promise<void> {
+    const rawContent = await this.app.vault.read(contentFile);
     // Strip frontmatter
     const content = rawContent.replace(/^---\n[\s\S]*?\n---\n?/, "");
 
