@@ -1,7 +1,8 @@
-import { ItemView, TFile, WorkspaceLeaf, MarkdownRenderer, setIcon } from "obsidian";
-import type IrisCardsPlugin from "./main";
-import { getDueCards, getAllCards, getModules, updateStability, getStability, getDifficulty, updateDifficulty } from "./leitner";
-import { markAnswer, appealAnswer, parseClozeTerms, occludeCloze, decodeMC, decodeSolveEquation, randomizeKnowns, evaluateFormula, roundToSigFigs, checkNumericalAnswer, decodeOrderSteps, shuffleArray, parseQABlock, type QAVariant } from "./claude";
+import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import type IrisCardsPlugin from "../main";
+import { getDueCards, getAllCards, getModules } from "../leitner";
+import { type QAVariant } from "../types/exercises";
+import { renderCurrentCard } from "./renderers";
 
 export const VIEW_TYPE_REVIEW = "iris-cards-review";
 
@@ -9,26 +10,26 @@ const SND_CORRECT = "data:audio/wav;base64,UklGRnwpAABXQVZFZm10IBAAAAABAAEAIlYAA
 
 const SND_INCORRECT = "data:audio/wav;base64,UklGRiYfAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQIfAAAAAEoAlQDfACoBdAG/AQkCVAKeAukCMwN+A8gDEwRdBKgE8gQ8BYcF0QUcBmYGsQb7BkYHkAfbByUIcAi6CAUJTwmaCeQJLgp5CsMKDgtYC6ML7Qs4DIIMzQwXDWENrA33DUEOjA4q8eDwlfBL8ADwtu9r7yHv1u6M7kHu9+2s7WLtF+3N7ILsOOzu66PrWesO68Tqeeov6uTpmulP6QXpuuhw6CXo2+eQ50bn/Oax5mfmHObS5YflPeXy5KjkXeQT5MjjfuMz4+niYh2sHfYdQR6LHtYeIB9rH7UfACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4AAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4AAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4AAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4AAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4AAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4ADgAOAA4AAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACAAIAAgACDtH9sfyB+1H6MfkB9+H2sfWR9GHzMfIR8OH/we6R7XHsQesR6fHoweeh5nHlUeQh4vHh0eCh74HeUd0h3AHVPiZeJ44orineKw4sLi1eLn4vriDOMf4zLjRONX42njfOOO46HjtOPG49nj6+P+4xDkI+Q25EjkW+Rt5IDkk+Sl5LjkyuTd5O/kAuUV5SflOuVM5V/lceWE5ZflqeW85c7l4eUNGvoZ5xnVGcIZsBmdGYsZeBllGVMZQBkuGRsZCRn2GOMY0Ri+GKwYmRiGGHQYYRhPGDwYKhgXGAQY8hffF80XuheoF5UXghdwF10XSxc4FyYXExcAF+4W2xbJFrYWpBaRFn4WlOmn6bnpzOnf6fHpBOoW6inqO+pO6mHqc+qG6pjqq+q96tDq4+r16gjrGust6z/rUutl63friuuc66/rwevU6+fr+esM7B7sMexD7Fbsaex77I7soOyz7Mbs2Ozr7P3sEO0i7csSuBKmEpMSgRJuElwSSRI2EiQSERL/EewR2hHHEbQRohGPEX0RahFYEUURMhEgEQ0R+xDoENUQwxCwEJ4QixB5EGYQUxBBEC4QHBAJEPcP5A/RD78PrA+aD4cPdQ9iD08PPQ/W8Ojw+/AN8SDxM/FF8VjxavF98Y/xovG18cfx2vHs8f/xEvIk8jfySfJc8m7ygfKU8qbyufLL8t7y8PID8xbzKPM7807zYPNy84XzmPOq873zz/Pi8/TzB/Qa9Cz0P/RR9GT0iQt3C2QLUgs/Cy0LGgsHC/UK4grQCr0KqwqYCoUKcwpgCk4KOwopChYKAwrxCd4JzAm5CacJlAmBCW8JXAlKCTcJJQkSCf8I7QjaCMgItQiiCJAIfQhrCFgIRggzCCAIDgj7Bxf4Kvg8+E/4Yvh0+If4mfis+L740fjk+Pb4Cfkb+S75QPlT+Wb5ePmL+Z35sPnD+dX56Pn6+Q36H/oy+kX6V/pq+nz6j/qh+rT6x/rZ+uz6/voR+yP7NvtJ+1v7bvuA+5P7pftIBDUEIwQQBP4D6wPYA8YDswOhA44DfANpA1YDRAMxAx8DDAP6AucC1ALCAq8CnQKKAngCZQJSAkACLQIbAggC9gHjAdABvgGrAZkBhgF0AWEBTgE8ASkBFwEEAfEA3wDMALoAWf9r/37/kf+j/7b/yP/b/+3/AAAA";
 
-function normalizeAnswer(s: string): string {
+export function normalizeAnswer(s: string): string {
   return s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
 }
 
 export class ReviewView extends ItemView {
-  private plugin: IrisCardsPlugin;
-  private dueCards: TFile[] = [];
-  private currentCard: TFile | null = null;
+  plugin: IrisCardsPlugin;
+  dueCards: TFile[] = [];
+  currentCard: TFile | null = null;
   private doneCheckInterval: number | null = null;
-  private infiniteMode = false;
-  private moduleFilter = new Set<string>();
-  private shownVariants = new Set<string>();
-  private scrollBody: HTMLDivElement | null = null;
-  private layoutReady = false;
-  private sndCorrect: HTMLAudioElement | null = null;
-  private sndIncorrect: HTMLAudioElement | null = null;
-  private currentCardEl: HTMLElement | null = null;
-  private currentVariant: QAVariant | null = null;
-  private scrollAnimId = 0;
-  private renderStateCache = new Map<string, Record<string, unknown>>();
+  infiniteMode = false;
+  moduleFilter = new Set<string>();
+  shownVariants = new Set<string>();
+  scrollBody: HTMLDivElement | null = null;
+  layoutReady = false;
+  sndCorrect: HTMLAudioElement | null = null;
+  sndIncorrect: HTMLAudioElement | null = null;
+  currentCardEl: HTMLElement | null = null;
+  currentVariant: QAVariant | null = null;
+  scrollAnimId = 0;
+  renderStateCache = new Map<string, Record<string, unknown>>();
   private resizeObs: ResizeObserver | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: IrisCardsPlugin) {
@@ -64,7 +65,7 @@ export class ReviewView extends ItemView {
     this.contentEl.empty();
   }
 
-  private getRenderState(cardFile: TFile, variant: QAVariant): Record<string, unknown> {
+  getRenderState(cardFile: TFile, variant: QAVariant): Record<string, unknown> {
     const key = cardFile.path + "\0" + variant.question;
     let state = this.renderStateCache.get(key);
     if (!state) {
@@ -74,14 +75,14 @@ export class ReviewView extends ItemView {
     return state;
   }
 
-  private clearDoneCheck(): void {
+  clearDoneCheck(): void {
     if (this.doneCheckInterval !== null) {
       window.clearInterval(this.doneCheckInterval);
       this.doneCheckInterval = null;
     }
   }
 
-  private async loadDueCards(): Promise<void> {
+  async loadDueCards(): Promise<void> {
     this.dueCards = this.infiniteMode
       ? await getAllCards(this.app, this.plugin.settings.cardsFolder, this.moduleFilter.size > 0 ? this.moduleFilter : undefined)
       : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
@@ -90,11 +91,11 @@ export class ReviewView extends ItemView {
       return;
     }
 
-    await this.plugin.pregenerateAll();
+    await this.plugin.pregen.pregenerateAll();
     await this.showNextCard();
   }
 
-  private ensureLayout(): void {
+  ensureLayout(): void {
     if (this.layoutReady) return;
 
     const container = this.contentEl;
@@ -133,7 +134,7 @@ export class ReviewView extends ItemView {
         const apiKey = this.plugin.settings.anthropicApiKey;
         if (!apiKey) return;
         this.currentCardEl.remove();
-        await this.renderCurrentCard(this.scrollBody, this.currentCard, this.currentVariant, apiKey);
+        await renderCurrentCard(this, this.scrollBody, this.currentCard, this.currentVariant, apiKey);
       }
     });
 
@@ -211,7 +212,7 @@ export class ReviewView extends ItemView {
     this.layoutReady = true;
   }
 
-  private scrollToCenter(el: HTMLElement): void {
+  scrollToCenter(el: HTMLElement): void {
     const body = this.scrollBody;
     if (!body) return;
     const id = ++this.scrollAnimId;
@@ -234,7 +235,7 @@ export class ReviewView extends ItemView {
     });
   }
 
-  private renderDoneCard(): void {
+  renderDoneCard(): void {
     this.clearDoneCheck();
     this.ensureLayout();
     const body = this.scrollBody!;
@@ -252,13 +253,13 @@ export class ReviewView extends ItemView {
       if (cards.length > 0) {
         this.clearDoneCheck();
         this.dueCards = cards;
-        await this.plugin.pregenerateAll();
+        await this.plugin.pregen.pregenerateAll();
         await this.showNextCard();
       }
     }, 10_000);
   }
 
-  private async showNextCard(): Promise<void> {
+  async showNextCard(): Promise<void> {
     this.clearDoneCheck();
     // Skip deleted cards
     while (this.dueCards.length > 0 && !this.app.vault.getAbstractFileByPath(this.dueCards[0].path)) {
@@ -278,7 +279,7 @@ export class ReviewView extends ItemView {
 
     // Pregenerate next card while user works on current one
     if (this.plugin.settings.anthropicApiKey && this.dueCards.length > 1) {
-      this.plugin.pregenerateQA(this.dueCards[1], this.plugin.settings.anthropicApiKey, 2);
+      this.plugin.pregen.pregenerateQA(this.dueCards[1], this.plugin.settings.anthropicApiKey, 2);
     }
 
     const body = this.scrollBody!;
@@ -298,7 +299,7 @@ export class ReviewView extends ItemView {
     }
 
     // Show loading indicator while generating Q&A
-    this.plugin.pregenerateQA(this.currentCard, apiKey, 2);
+    this.plugin.pregen.pregenerateQA(this.currentCard, apiKey, 2);
     const loadingCard = body.createDiv({ cls: "iris-card" });
     loadingCard.createEl("p", { text: "Generating question\u2026", cls: "iris-loading" });
     this.scrollToCenter(loadingCard);
@@ -353,646 +354,10 @@ export class ReviewView extends ItemView {
 
     // Create card
     this.currentVariant = variant;
-    await this.renderCurrentCard(body, cardFile, variant, apiKey);
+    await renderCurrentCard(this, body, cardFile, variant, apiKey);
   }
 
-  /** Dispatch to the correct type-specific renderer for a card element. */
-  private async renderVariantInto(card: HTMLElement, cardFile: TFile, variant: QAVariant, apiKey: string): Promise<void> {
-    const renderers: Record<string, () => Promise<void>> = {
-      "Multiple Choice": async () => {
-        const mc = decodeMC(variant.question, variant.answer);
-        await this.renderChoiceCard(card, cardFile, variant, {
-          questionMd: mc.question,
-          options: mc.options.map(o => ({ label: o.text, value: o.letter })),
-          correct: mc.correct,
-        });
-      },
-      "True/False": async () => {
-        await this.renderChoiceCard(card, cardFile, variant, {
-          questionMd: `**True or false?**\n\n${variant.question}`,
-          options: [
-            { label: "True", value: "True", cls: "iris-tf-true" },
-            { label: "False", value: "False", cls: "iris-tf-false" },
-          ],
-          correct: variant.answer,
-          optionsCls: "iris-tf-options",
-        });
-      },
-      "Cloze": () => this.renderCloze(card, cardFile, variant),
-      "Solve Equation": () => this.renderSolveEquation(card, cardFile, variant),
-      "Order Steps": () => this.renderOrderSteps(card, cardFile, variant),
-      "Correct the Mistake": async () => {
-        await this.renderInputCard(card, cardFile, variant, {
-          questionMd: `**Find and correct the mistake:**\n\n${variant.question}`,
-          answerMd: variant.answer,
-          llmMarker: {
-            apiKey,
-            question: `The following statement contains a mistake: "${variant.question}"\nWhat is the corrected version?`,
-            answer: variant.answer,
-            acceptedAnswers: variant.acceptedAnswers,
-          },
-        });
-      },
-      "Assemble Equation": () => this.renderAssembleEquation(card, cardFile, variant),
-    };
-    await (renderers[variant.exerciseType] ?? (() => this.renderQA(card, cardFile, variant, apiKey)))();
-  }
-
-  private async renderCurrentCard(body: HTMLDivElement, cardFile: TFile, variant: QAVariant, apiKey: string): Promise<void> {
-    body.querySelectorAll(".iris-card-preview").forEach((el) => el.remove());
-    const card = body.createDiv({ cls: "iris-card" });
-    this.currentCardEl = card;
-
-    await this.renderVariantInto(card, cardFile, variant, apiKey);
-
-    // Suspend button — permanently disables this question variant
-    const suspendBtn = card.createEl("button", {
-      cls: "iris-card-icon iris-suspend-btn",
-      attr: { "aria-label": "Suspend question" },
-    });
-    setIcon(suspendBtn, "eye-off");
-    suspendBtn.addEventListener("click", async () => {
-      const remaining = await this.plugin.cardStore.suspendVariant(cardFile, variant.question);
-      this.plugin.qaCache.delete(cardFile.path);
-      if (remaining.length === 0) this.dueCards.shift();
-      await this.showNextCard();
-    });
-
-    // Parent note button — opens the source note
-    const parentNote = this.app.metadataCache.getFileCache(cardFile)?.frontmatter?.["parent-note"];
-    if (parentNote) {
-      const linkMatch = typeof parentNote === "string" && parentNote.match(/^\[\[(.+?)(\|.+?)?\]\]$/);
-      if (linkMatch) {
-        const parentBtn = card.createEl("button", {
-          cls: "iris-card-icon iris-parent-btn",
-          attr: { "aria-label": "Open parent note" },
-        });
-        setIcon(parentBtn, "help-circle");
-        parentBtn.addEventListener("click", () => {
-          this.app.workspace.openLinkText(linkMatch[1], cardFile.path);
-        });
-      }
-    }
-
-    // Skip button — moves card to end without affecting box
-    const skipBtn = card.createEl("button", {
-      cls: "iris-card-icon iris-skip-card-btn",
-      attr: { "aria-label": "Skip card" },
-    });
-    setIcon(skipBtn, "arrow-right");
-    skipBtn.addEventListener("click", async () => {
-      const skipped = this.dueCards.shift();
-      if (skipped) this.dueCards.push(skipped);
-      await this.showNextCard();
-    });
-
-    this.scrollToCenter(card);
-
-    // Render previews as inert (no input focus, no click handlers)
-    this.renderUpcomingPreviews(body);
-  }
-
-  // ─── Shared Input Card Helper ───────────────────────────────
-
-  /**
-   * Renders a card with: question → text input → hidden answer → marking.
-   * Supports three modes via opts:
-   *   - checkAnswer only: instant local check (Cloze, Solve Equation, Assemble Equation)
-   *   - llmMarker: exact-match shortcut → LLM fallback (Q&A autoMark, Correct the Mistake, Explain Why)
-   *   - Both can have autoSubmitOnMatch for auto-submit when typed answer matches locally
-   */
-  private async renderInputCard(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant,
-    opts: {
-      questionMd: string;
-      answerMd: string;
-      checkAnswer?: (input: string) => boolean;
-      autoSubmitOnMatch?: boolean;
-      inputMode?: string;
-      llmMarker?: { apiKey: string; question: string; answer: string; acceptedAnswers?: string[] };
-    },
-  ): Promise<void> {
-    const questionSection = card.createDiv({ cls: "iris-question" });
-    await MarkdownRenderer.render(this.app, opts.questionMd, questionSection.createDiv(), "", this);
-
-    const inputSection = card.createDiv({ cls: "iris-user-answer" });
-    const attrs: Record<string, string> = {};
-    if (opts.inputMode) attrs.inputmode = opts.inputMode;
-    const input = inputSection.createEl("input", { type: "text", cls: "iris-answer-input", attr: attrs });
-
-    const answerSection = card.createDiv({ cls: "iris-answer iris-hidden" });
-    await MarkdownRenderer.render(this.app, opts.answerMd, answerSection.createDiv(), "", this);
-
-    const markingEl = card.createDiv({ cls: "iris-marking iris-hidden" });
-
-    input.focus();
-
-    const t0 = performance.now();
-    let answered = false;
-
-    const showResult = (correct: boolean) => {
-      answerSection.removeClass("iris-hidden");
-      markingEl.removeClass("iris-hidden");
-      markingEl.setText(correct ? "Correct" : "Incorrect");
-      markingEl.toggleClass("iris-marking-correct", correct);
-      markingEl.toggleClass("iris-marking-incorrect", !correct);
-      input.disabled = true;
-    };
-
-    // Build exact-match checker for LLM marker mode
-    const isExactMatch = opts.llmMarker
-      ? (val: string) => {
-          const norm = normalizeAnswer(val);
-          const all = [opts.llmMarker!.answer, ...(opts.llmMarker!.acceptedAnswers ?? [])];
-          return all.some(a => normalizeAnswer(a) === norm);
-        }
-      : null;
-
-    const submitAnswer = async () => {
-      if (answered) return;
-      answered = true;
-      const elapsedMs = Math.round(performance.now() - t0);
-      const userAnswer = input.value.trim();
-      const isRecord = (ms: number, correct: boolean) => correct && variant.recordMs != null && ms < variant.recordMs;
-
-      if (!userAnswer) {
-        this.playFeedback(false);
-        showResult(false);
-        await new Promise(r => setTimeout(r, 1200));
-        await this.rateCard(cardFile, false, undefined, variant.question, elapsedMs);
-        return;
-      }
-
-      // Local check mode (Cloze, Solve Equation, Assemble Equation)
-      if (opts.checkAnswer && !opts.llmMarker) {
-        const correct = opts.checkAnswer(userAnswer);
-        this.playFeedback(correct, isRecord(elapsedMs, correct));
-        showResult(correct);
-        if (!correct) {
-          this.addAppealButton(card, cardFile, variant, userAnswer, markingEl, opts.questionMd);
-        }
-        await this.rateCard(cardFile, correct, correct ? userAnswer : undefined, variant.question, elapsedMs);
-        return;
-      }
-
-      // LLM marker mode: try exact match first, then fall back to LLM
-      if (isExactMatch?.(userAnswer)) {
-        this.playFeedback(true, isRecord(elapsedMs, true));
-        showResult(true);
-        await new Promise(r => setTimeout(r, 800));
-        await this.rateCard(cardFile, true, userAnswer, variant.question, elapsedMs);
-        return;
-      }
-
-      input.disabled = true;
-      const marking = card.createEl("p", { text: "Marking\u2026", cls: "iris-loading" });
-      try {
-        const correct = await markAnswer(
-          opts.llmMarker!.question, opts.llmMarker!.answer, userAnswer,
-          opts.llmMarker!.apiKey, this.plugin.settings.claudeModel,
-        );
-        marking.remove();
-        this.playFeedback(correct, isRecord(elapsedMs, correct));
-        showResult(correct);
-        if (!correct) {
-          this.addAppealButton(card, cardFile, variant, userAnswer, markingEl);
-        }
-        await this.rateCard(cardFile, correct, correct ? userAnswer : undefined, variant.question, elapsedMs);
-      } catch (e) {
-        marking.remove();
-        answered = false;
-        input.disabled = false;
-        markingEl.setText(`Marking failed: ${e instanceof Error ? e.message : String(e)}`);
-        markingEl.addClass("iris-marking-incorrect");
-        markingEl.removeClass("iris-hidden");
-      }
-    };
-
-    if (opts.autoSubmitOnMatch) {
-      const checker = opts.checkAnswer ?? isExactMatch;
-      if (checker) {
-        input.addEventListener("input", () => {
-          if (!answered && checker(input.value.trim())) submitAnswer();
-        });
-      }
-    }
-
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAnswer(); }
-    });
-  }
-
-  // ─── Appeal Helper ─────────────────────────────────────────
-
-  private addAppealButton(
-    card: HTMLElement,
-    cardFile: TFile,
-    variant: QAVariant,
-    userAnswer: string,
-    markingEl: HTMLElement,
-    appealQuestion?: string,
-  ): void {
-    const apiKey = this.plugin.settings.anthropicApiKey;
-    if (!apiKey) return;
-
-    const preFm = this.app.metadataCache.getFileCache(cardFile)?.frontmatter;
-    const preStability = getStability(preFm);
-    const preDifficulty = getDifficulty(preFm);
-
-    const appealBtn = card.createEl("button", {
-      cls: "iris-card-icon iris-appeal-icon",
-      attr: { "aria-label": "Appeal" },
-    });
-    setIcon(appealBtn, "scale");
-
-    appealBtn.addEventListener("click", async () => {
-      appealBtn.disabled = true;
-      appealBtn.addClass("iris-loading");
-      markingEl.setText("Remarking\u2026");
-      markingEl.removeClass("iris-marking-incorrect");
-      markingEl.removeClass("iris-marking-correct");
-      markingEl.addClass("iris-loading");
-      try {
-        const overturned = await appealAnswer(
-          appealQuestion ?? variant.question, userAnswer, apiKey,
-        );
-        markingEl.removeClass("iris-loading");
-        if (overturned) {
-          this.playFeedback(true);
-          await this.app.fileManager.processFrontMatter(cardFile, (fm) => {
-            fm["stability"] = updateStability(preStability, true, preDifficulty);
-            fm["difficulty"] = updateDifficulty(preDifficulty, true);
-            delete fm["box"];
-          });
-          await this.plugin.cardStore.addAcceptedAnswer(cardFile, variant.question, userAnswer);
-          markingEl.setText("Correct");
-          markingEl.addClass("iris-marking-correct");
-          appealBtn.remove();
-          this.plugin.updateBadge();
-        } else {
-          this.playFeedback(false);
-          markingEl.setText("Incorrect");
-          markingEl.addClass("iris-marking-incorrect");
-          appealBtn.remove();
-        }
-      } catch {
-        markingEl.removeClass("iris-loading");
-        markingEl.setText("Remarking failed");
-        markingEl.addClass("iris-marking-incorrect");
-        appealBtn.disabled = false;
-        appealBtn.removeClass("iris-loading");
-      }
-    });
-  }
-
-  // ─── Q&A Renderer ──────────────────────────────────────────
-
-  private async renderQA(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant, apiKey: string,
-  ): Promise<void> {
-    if (this.plugin.settings.autoMark) {
-      await this.renderInputCard(card, cardFile, variant, {
-        questionMd: variant.question,
-        answerMd: variant.answer,
-        autoSubmitOnMatch: true,
-        llmMarker: {
-          apiKey,
-          question: variant.question,
-          answer: variant.answer,
-          acceptedAnswers: variant.acceptedAnswers,
-        },
-      });
-      return;
-    }
-
-    const t0 = performance.now();
-
-    const questionSection = card.createDiv({ cls: "iris-question" });
-    await MarkdownRenderer.render(this.app, variant.question, questionSection.createDiv(), "", this);
-
-    const showBtn = card.createEl("button", {
-      cls: "iris-show-btn",
-      attr: { "aria-label": "Show answer" },
-    });
-    setIcon(showBtn, "eye");
-
-    const answerSection = card.createDiv({ cls: "iris-answer iris-hidden" });
-    await MarkdownRenderer.render(this.app, variant.answer, answerSection.createDiv(), "", this);
-
-    const actions = card.createDiv({ cls: "iris-actions iris-hidden" });
-
-    const wrongBtn = actions.createEl("button", { cls: "iris-wrong-btn", attr: { "aria-label": "Wrong" } });
-    setIcon(wrongBtn, "x");
-    wrongBtn.addEventListener("click", () => {
-      const elapsedMs = Math.round(performance.now() - t0);
-      this.playFeedback(false);
-      this.rateCard(cardFile, false, undefined, variant.question, elapsedMs);
-    });
-
-    const rightBtn = actions.createEl("button", { cls: "iris-right-btn", attr: { "aria-label": "Right" } });
-    setIcon(rightBtn, "check");
-    rightBtn.addEventListener("click", () => {
-      const elapsedMs = Math.round(performance.now() - t0);
-      const record = variant.recordMs != null && elapsedMs < variant.recordMs;
-      this.playFeedback(true, record);
-      this.rateCard(cardFile, true, undefined, variant.question, elapsedMs);
-    });
-
-    showBtn.addEventListener("click", () => {
-      answerSection.removeClass("iris-hidden");
-      showBtn.addClass("iris-hidden");
-      actions.removeClass("iris-hidden");
-    });
-  }
-
-  // ─── Choice Card Renderer (MC + True/False) ────────────────────
-
-  private async renderChoiceCard(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant,
-    opts: { questionMd: string; options: { label: string; value: string; cls?: string }[]; correct: string; optionsCls?: string },
-  ): Promise<void> {
-    const questionSection = card.createDiv({ cls: "iris-question" });
-    await MarkdownRenderer.render(this.app, opts.questionMd, questionSection.createDiv(), "", this);
-
-    const optionsSection = card.createDiv({ cls: `iris-mc-options${opts.optionsCls ? " " + opts.optionsCls : ""}` });
-    let answered = false;
-    const t0 = performance.now();
-
-    for (const opt of opts.options) {
-      const btn = optionsSection.createEl("button", {
-        cls: `iris-mc-option${opt.cls ? " " + opt.cls : ""}`,
-        text: opt.label,
-        attr: { "data-value": opt.value },
-      });
-
-      btn.addEventListener("click", async () => {
-        if (answered) return;
-        answered = true;
-        const elapsedMs = Math.round(performance.now() - t0);
-
-        const correct = opt.value === opts.correct;
-        const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-        this.playFeedback(correct, record);
-
-        for (const child of Array.from(optionsSection.querySelectorAll<HTMLButtonElement>(".iris-mc-option"))) {
-          child.disabled = true;
-          if (child.dataset.value === opts.correct) {
-            child.addClass("iris-mc-correct");
-          } else if (child === btn && !correct) {
-            child.addClass("iris-mc-incorrect");
-          }
-        }
-
-        await this.rateCard(cardFile, correct, undefined, variant.question, elapsedMs);
-      });
-    }
-  }
-
-  // ─── Cloze Renderer ──────────────────────────────────────────
-
-  private async renderCloze(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant,
-  ): Promise<void> {
-    const sentence = variant.question;
-    const terms = parseClozeTerms(sentence);
-    if (terms.length === 0) {
-      card.createEl("p", { text: "No cloze terms found in this card.", cls: "iris-error" });
-      return;
-    }
-
-    const rs = this.getRenderState(cardFile, variant);
-    const occludeIdx = (rs.clozeIdx as number) ?? (rs.clozeIdx = Math.floor(Math.random() * terms.length));
-    const { display, answer } = occludeCloze(sentence, occludeIdx);
-    const allAnswers = [answer, ...variant.acceptedAnswers];
-
-    // Full sentence with the occluded term bolded
-    let ti = 0;
-    const filled = sentence.replace(/\*([^*]+)\*/g, (_, term) => ti++ === occludeIdx ? `**${term}**` : term);
-
-    await this.renderInputCard(card, cardFile, variant, {
-      questionMd: display,
-      answerMd: filled,
-      checkAnswer: (val) => allAnswers.some(a => normalizeAnswer(a) === normalizeAnswer(val)),
-      autoSubmitOnMatch: true,
-    });
-  }
-
-  // ─── Solve Equation Renderer ──────────────────────────────────
-
-  private async renderSolveEquation(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant,
-  ): Promise<void> {
-    let se;
-    try {
-      se = decodeSolveEquation(variant.question, variant.answer);
-    } catch {
-      card.createEl("p", { text: "Malformed equation problem.", cls: "iris-error" });
-      return;
-    }
-
-    const rs = this.getRenderState(cardFile, variant);
-    const values = (rs.knownValues as Record<string, number>) ?? (rs.knownValues = randomizeKnowns(se.knowns));
-    let expected: number;
-    try {
-      expected = evaluateFormula(se.formula, values);
-      if (!isFinite(expected)) throw new Error("Non-finite result");
-    } catch {
-      card.createEl("p", { text: "Could not compute expected answer.", cls: "iris-error" });
-      return;
-    }
-    expected = roundToSigFigs(expected, se.target.sigfigs);
-
-    const knownLines = se.knowns
-      .map(k => `- **${k.name}** (*${k.symbol}*) = ${values[k.symbol]} ${k.units}`)
-      .join("\n");
-    const display = `${se.scenario}\n\n${knownLines}\n\n**Solve for:** ${se.target.name} (*${se.target.symbol}*) in ${se.target.units}`;
-
-    await this.renderInputCard(card, cardFile, variant, {
-      questionMd: display,
-      answerMd: `${expected} ${se.target.units}`,
-      checkAnswer: (val) => {
-        const num = parseFloat(val);
-        return !isNaN(num) && checkNumericalAnswer(num, expected, se.target.sigfigs);
-      },
-      inputMode: "decimal",
-    });
-  }
-
-  // ─── Assemble Equation Renderer ──────────────────────────────
-
-  private async renderAssembleEquation(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant,
-  ): Promise<void> {
-    const title = variant.question;
-    const equation = variant.answer;
-    const terms = parseClozeTerms(equation);
-    if (terms.length < 2) {
-      card.createEl("p", { text: "Malformed equation.", cls: "iris-error" });
-      return;
-    }
-
-    const rs = this.getRenderState(cardFile, variant);
-    const occludeIdx = (rs.clozeIdx as number) ?? (rs.clozeIdx = Math.floor(Math.random() * terms.length));
-    const { display, answer } = occludeCloze(equation, occludeIdx);
-    const allAnswers = [answer, ...variant.acceptedAnswers];
-
-    // Full equation with the occluded term bolded
-    let ti = 0;
-    const filled = equation.replace(/\*([^*]+)\*/g, (_, term) => ti++ === occludeIdx ? `**${term}**` : term);
-
-    await this.renderInputCard(card, cardFile, variant, {
-      questionMd: `**${title}**\n\n${display}`,
-      answerMd: `**${title}**\n\n${filled}`,
-      checkAnswer: (val) => allAnswers.some(a => normalizeAnswer(a) === normalizeAnswer(val)),
-      autoSubmitOnMatch: true,
-    });
-  }
-
-  // ─── Order Steps Renderer ──────────────────────────────────────
-
-  private async renderOrderSteps(
-    card: HTMLElement, cardFile: TFile, variant: QAVariant,
-  ): Promise<void> {
-    let os;
-    try {
-      os = decodeOrderSteps(variant.question, variant.answer);
-    } catch {
-      card.createEl("p", { text: "Malformed order-steps problem.", cls: "iris-error" });
-      return;
-    }
-
-    if (os.steps.length < 2) {
-      card.createEl("p", { text: "Not enough steps to order.", cls: "iris-error" });
-      return;
-    }
-
-    const questionSection = card.createDiv({ cls: "iris-question" });
-    await MarkdownRenderer.render(this.app, `**Order the steps:** ${os.title}`, questionSection.createDiv(), "", this);
-
-    // Drag-to-reorder list
-    const listEl = card.createDiv({ cls: "iris-order-list" });
-    const rs = this.getRenderState(cardFile, variant);
-    const order: { text: string; origIdx: number }[] =
-      (Array.isArray(rs.shuffledOrder) ? rs.shuffledOrder : null) ??
-      (rs.shuffledOrder = shuffleArray(os.steps.map((text, origIdx) => ({ text, origIdx }))));
-    let answered = false;
-    let dragIdx: number | null = null;
-    const t0 = performance.now();
-
-    const renderList = () => {
-      listEl.empty();
-      order.forEach((item, i) => {
-        const row = listEl.createDiv({
-          cls: "iris-order-row",
-          attr: { draggable: "true" },
-        });
-        row.createSpan({ cls: "iris-order-handle" });
-        setIcon(row.querySelector(".iris-order-handle")!, "grip-vertical");
-        row.createSpan({ cls: "iris-order-num", text: `${i + 1}` });
-        row.createSpan({ cls: "iris-order-text", text: item.text });
-
-        row.addEventListener("dragstart", (e) => {
-          dragIdx = i;
-          row.addClass("iris-order-dragging");
-          e.dataTransfer!.effectAllowed = "move";
-        });
-
-        row.addEventListener("dragend", () => {
-          dragIdx = null;
-          row.removeClass("iris-order-dragging");
-          listEl.querySelectorAll(".iris-order-drop-above, .iris-order-drop-below")
-            .forEach(el => { el.removeClass("iris-order-drop-above"); el.removeClass("iris-order-drop-below"); });
-        });
-
-        row.addEventListener("dragover", (e) => {
-          e.preventDefault();
-          if (dragIdx === null || dragIdx === i) return;
-          const rect = row.getBoundingClientRect();
-          const above = e.clientY < rect.top + rect.height / 2;
-          row.toggleClass("iris-order-drop-above", above);
-          row.toggleClass("iris-order-drop-below", !above);
-        });
-
-        row.addEventListener("dragleave", () => {
-          row.removeClass("iris-order-drop-above");
-          row.removeClass("iris-order-drop-below");
-        });
-
-        row.addEventListener("drop", (e) => {
-          e.preventDefault();
-          if (dragIdx === null || dragIdx === i) return;
-          const rect = row.getBoundingClientRect();
-          const above = e.clientY < rect.top + rect.height / 2;
-          const [dragged] = order.splice(dragIdx, 1);
-          let target = above ? i : i + 1;
-          if (dragIdx < i) target--;
-          order.splice(target, 0, dragged);
-          renderList();
-        });
-      });
-    };
-
-    renderList();
-
-    // Check button
-    const checkBtn = card.createEl("button", {
-      cls: "iris-order-check",
-      text: "Check",
-    });
-
-    checkBtn.addEventListener("click", async () => {
-      if (answered) return;
-      answered = true;
-      const elapsedMs = Math.round(performance.now() - t0);
-      checkBtn.remove();
-
-      const correct = order.every((item, i) => item.text === os.steps[i]);
-      const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-      this.playFeedback(correct, record);
-
-      // Mark each row correct/incorrect and disable dragging
-      const rows = Array.from(listEl.querySelectorAll(".iris-order-row"));
-      rows.forEach((row, i) => {
-        row.setAttribute("draggable", "false");
-        row.addClass(order[i].text === os.steps[i] ? "iris-order-correct" : "iris-order-incorrect");
-      });
-
-      // Show correct order
-      const answerSection = card.createDiv({ cls: "iris-answer" });
-      const correctMd = os.steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
-      await MarkdownRenderer.render(this.app, correctMd, answerSection.createDiv(), "", this);
-
-      const markingEl = card.createDiv({ cls: "iris-marking" });
-      markingEl.setText(correct ? "Correct" : "Incorrect");
-      markingEl.addClass(correct ? "iris-marking-correct" : "iris-marking-incorrect");
-
-      await this.rateCard(cardFile, correct, undefined, variant.question, elapsedMs);
-    });
-  }
-
-  private async renderUpcomingPreviews(body: HTMLDivElement): Promise<void> {
-    const apiKey = this.plugin.settings.anthropicApiKey ?? "";
-    for (let i = 1; i < this.dueCards.length; i++) {
-      const file = this.dueCards[i];
-      const content = await this.app.vault.cachedRead(file);
-      const parsed = parseQABlock(content);
-      const active = parsed.variants.filter(v => !v.suspended);
-      if (active.length === 0) continue;
-      const variant = active.reduce((best, v) => {
-        const bD = best.difficulty ?? 0.5;
-        const vD = v.difficulty ?? 0.5;
-        if (vD > bD) return v;
-        if (vD < bD) return best;
-        if (best.lastReviewed === null) return best;
-        if (v.lastReviewed === null) return v;
-        return v.lastReviewed < best.lastReviewed ? v : best;
-      }, active[0]);
-      const preview = body.createDiv({ cls: "iris-card iris-card-preview", attr: { inert: "" } });
-      await this.renderVariantInto(preview, file, variant, apiKey);
-    }
-  }
-
-  private playFeedback(correct: boolean, record?: boolean): void {
+  playFeedback(correct: boolean, record?: boolean): void {
     if (this.plugin.settings.soundFeedback) {
       const snd = correct ? this.sndCorrect : this.sndIncorrect;
       if (snd) {
@@ -1014,7 +379,7 @@ export class ReviewView extends ItemView {
     }
   }
 
-  private async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number): Promise<void> {
+  async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number): Promise<void> {
     // Freeze the current card as answered — disable interactions, keep answer visible
     if (this.currentCardEl) {
       this.currentCardEl.addClass("iris-card-answered");

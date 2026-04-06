@@ -1,5 +1,6 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
-import { parseQABlock, stripQABlock, buildQABlock, type QAVariant, type ExerciseType } from "./claude";
+import { type QAVariant, type ExerciseType } from "./types/exercises";
+import { parseQABlock, stripQABlock, buildQABlock } from "./types/qa-block";
 import { getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog } from "./leitner";
 
 function normalizeAnswer(s: string): string {
