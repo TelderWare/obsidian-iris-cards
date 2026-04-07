@@ -2,6 +2,7 @@ import { MarkdownView, TFile, TFolder, Notice } from "obsidian";
 import { extractFactsFromNote } from "../generators";
 import { stripMarkdown } from "./utils";
 import type IrisCardsPlugin from "../main";
+import { hasRelay } from "../api/client";
 
 function buildContextLineForLine(plugin: IrisCardsPlugin, sourceFile: TFile, line: number): string {
   const cache = plugin.app.metadataCache.getFileCache(sourceFile);

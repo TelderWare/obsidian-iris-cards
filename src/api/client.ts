@@ -4,6 +4,7 @@ import { App, requestUrl } from "obsidian";
 
 let _app: App | undefined;
 export function setRelayApp(app: App): void { _app = app; }
+export function hasRelay(): boolean { return !!(_app as any)?.irisRelay; }
 
 /** Relay priority for the current batch (0-10, lower = first). Default 5. */
 let _relayPriority: number | undefined;

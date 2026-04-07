@@ -3,6 +3,7 @@ import type IrisCardsPlugin from "../main";
 import { getDueCards, getAllCards, getModules } from "../leitner";
 import { type QAVariant } from "../types/exercises";
 import { renderCurrentCard } from "./renderers";
+import { hasRelay } from "../api/client";
 
 export const VIEW_TYPE_REVIEW = "iris-cards-review";
 

@@ -1,7 +1,7 @@
 import { TFile } from "obsidian";
 import { TYPE_PRIORITY, type QAVariant, type ExerciseType } from "../types/exercises";
 import { parseQABlock } from "../types/qa-block";
-import { setRelayPriority } from "../api/client";
+import { setRelayPriority, hasRelay } from "../api/client";
 import { standardizeQuestion } from "../api/qc";
 import {
   classifyEligibility,
@@ -44,7 +44,7 @@ export class PregenManager {
 
   async pregenerateAll(): Promise<void> {
     const apiKey = this.plugin.settings.anthropicApiKey;
-    if (!apiKey) return;
+    if (!apiKey && !hasRelay()) return;
     const cards = await getDueCards(this.plugin.app, this.plugin.settings.cardsFolder, 0, undefined, this.plugin.settings.desiredRetention);
     for (const card of cards) {
       this.enqueuePregen(card, 0);
