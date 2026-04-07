@@ -277,21 +277,23 @@ export class ReviewView extends ItemView {
     const cardFile = this.currentCard;
     this.ensureLayout();
 
+    const apiKey = this.plugin.settings.anthropicApiKey;
+    const hasRelay = !!(this.plugin.app as any).irisRelay;
+
     // Pregenerate next card while user works on current one
-    if (this.plugin.settings.anthropicApiKey && this.dueCards.length > 1) {
-      this.plugin.pregen.pregenerateQA(this.dueCards[1], this.plugin.settings.anthropicApiKey, 2);
+    if ((apiKey || hasRelay) && this.dueCards.length > 1) {
+      this.plugin.pregen.pregenerateQA(this.dueCards[1], apiKey, 2);
     }
 
     const body = this.scrollBody!;
     // Remove stale previews and done card; answered cards stay
     body.querySelectorAll(".iris-card-preview, .iris-done-card").forEach((el) => el.remove());
 
-    // Check API key
-    const apiKey = this.plugin.settings.anthropicApiKey;
-    if (!apiKey) {
+    // Need either a local key or the Iris Router relay
+    if (!apiKey && !hasRelay) {
       const card = body.createDiv({ cls: "iris-card" });
       card.createEl("p", {
-        text: "No API key configured. Set your Anthropic API key in Iris Cards settings.",
+        text: "No API key configured. Set your Anthropic API key in Iris Cards settings, or enable the Iris Router plugin.",
         cls: "iris-error",
       });
       this.scrollToCenter(card);

@@ -30,8 +30,8 @@ function buildContextLineForLine(plugin: IrisCardsPlugin, sourceFile: TFile, lin
 
 export async function generateQuiz(plugin: IrisCardsPlugin): Promise<void> {
   const apiKey = plugin.settings.anthropicApiKey;
-  if (!apiKey) {
-    new Notice("Set your Anthropic API key in Iris Cards settings.");
+  if (!apiKey && !(plugin.app as any).irisRelay) {
+    new Notice("Set your Anthropic API key in Iris Cards settings (or enable Iris Router).");
     return;
   }
 
@@ -46,8 +46,8 @@ export async function generateQuiz(plugin: IrisCardsPlugin): Promise<void> {
 
 export async function generateQuizFromLinkedNote(plugin: IrisCardsPlugin): Promise<void> {
   const apiKey = plugin.settings.anthropicApiKey;
-  if (!apiKey) {
-    new Notice("Set your Anthropic API key in Iris Cards settings.");
+  if (!apiKey && !(plugin.app as any).irisRelay) {
+    new Notice("Set your Anthropic API key in Iris Cards settings (or enable Iris Router).");
     return;
   }
 
