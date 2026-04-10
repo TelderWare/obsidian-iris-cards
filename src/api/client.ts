@@ -80,14 +80,17 @@ async function apiRequest(apiKey: string, body: object, relayPriority?: number):
 export async function callClaudeTool<T>(
   apiKey: string, model: string, system: string,
   content: string, tool: object, maxTokens: number,
+  temperature?: number,
 ): Promise<T> {
   const toolName = (tool as { name: string }).name;
-  const json = await apiRequest(apiKey, {
+  const body: Record<string, unknown> = {
     model, max_tokens: maxTokens, system,
     messages: [{ role: "user", content }],
     tools: [tool],
     tool_choice: { type: "tool", name: toolName },
-  });
+  };
+  if (temperature !== undefined) body.temperature = temperature;
+  const json = await apiRequest(apiKey, body);
   const block = (json?.content as { type: string; input?: T }[] | undefined)?.find(
     (b) => b.type === "tool_use",
   );

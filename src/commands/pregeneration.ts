@@ -11,15 +11,21 @@ import {
   generateSolveEquation, encodeSolveEquation,
   generateOrderSteps, encodeOrderSteps,
   generateCorrectMistake,
-  generateExplainWhy,
   generateTrueFalse,
   generateAssembleEquation, encodeAssembleEquation,
 } from "../generators";
 import { getDueCards } from "../leitner";
 import type IrisCardsPlugin from "../main";
 
+interface PregenEntry {
+  card: TFile;
+  priority: number;
+  resolve: (v: QAVariant[]) => void;
+  reject: (e: unknown) => void;
+}
+
 export class PregenManager {
-  private pregenQueue: { card: TFile; priority: number }[] = [];
+  private pregenQueue: PregenEntry[] = [];
   private pregenQueued = new Set<string>();
   private pregenRunning = 0;
   private readonly PREGEN_CONCURRENCY = 3;
@@ -31,14 +37,24 @@ export class PregenManager {
     if (this.pregenQueued.has(card.path)) {
       const existing = this.pregenQueue.findIndex(e => e.card.path === card.path);
       if (existing === -1 || this.pregenQueue[existing].priority >= priority) return;
-      this.pregenQueue.splice(existing, 1);
+      const [entry] = this.pregenQueue.splice(existing, 1);
+      entry.priority = priority;
+      const idx = this.pregenQueue.findIndex(e => e.priority < priority);
+      if (idx === -1) this.pregenQueue.push(entry);
+      else this.pregenQueue.splice(idx, 0, entry);
+      return;
     }
+    let resolve!: (v: QAVariant[]) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<QAVariant[]>((res, rej) => { resolve = res; reject = rej; });
+    this.plugin.qaCache.set(card.path, promise);
     this.pregenQueued.add(card.path);
+    const entry: PregenEntry = { card, priority, resolve, reject };
     const idx = this.pregenQueue.findIndex(e => e.priority < priority);
     if (idx === -1) {
-      this.pregenQueue.push({ card, priority });
+      this.pregenQueue.push(entry);
     } else {
-      this.pregenQueue.splice(idx, 0, { card, priority });
+      this.pregenQueue.splice(idx, 0, entry);
     }
   }
 
@@ -67,11 +83,11 @@ export class PregenManager {
 
   private drainPregenQueue(apiKey: string): void {
     while (this.pregenRunning < this.PREGEN_CONCURRENCY && this.pregenQueue.length > 0) {
-      const { card, priority: localPriority } = this.pregenQueue.shift()!;
+      const entry = this.pregenQueue.shift()!;
+      const { card, priority: localPriority, resolve, reject } = entry;
       this.pregenQueued.delete(card.path);
-      if (this.plugin.qaCache.has(card.path)) continue;
       this.pregenRunning++;
-      const promise = (async () => {
+      void (async () => {
         try {
           setRelayPriority(PregenManager.toRelayPriority(localPriority));
           const content = await this.plugin.app.vault.read(card);
@@ -92,34 +108,37 @@ export class PregenManager {
 
           const coveredTypes = new Set(variants.map(v => v.exerciseType));
           const prioritized = TYPE_PRIORITY.filter(t => eligible.includes(t));
-          const nextType = !hasUnreviewed
-            ? prioritized.find(t => !coveredTypes.has(t))
+          const candidates = prioritized.filter(t => !coveredTypes.has(t));
+          const nextType = !hasUnreviewed && candidates.length > 0
+            ? candidates[Math.floor(Math.random() * candidates.length)]
             : undefined;
 
+          let generatedVariants: QAVariant[] = [];
           if (nextType) {
             try {
-              const newVariants = await this.generateForType(nextType, parsed.body, apiKey);
-              variants.push(...newVariants);
+              generatedVariants = await this.generateForType(nextType, parsed.body, apiKey);
+              variants.push(...generatedVariants);
             } catch { /* single type failure is non-fatal */ }
           }
 
           if (nextType || parsed.eligibleTypes.length === 0) {
-            await this.plugin.cardStore.updateVariants(card, (vs, el) => {
-              vs.length = 0;
-              vs.push(...variants);
+            variants = await this.plugin.cardStore.updateVariants(card, (vs, el) => {
+              vs.push(...generatedVariants);
               el.length = 0;
               el.push(...eligible);
             });
           }
           await this.plugin.cardStore.updateSuspendedFlag(card, variants);
-          return variants;
+          resolve(variants);
+        } catch (e) {
+          this.plugin.qaCache.delete(card.path);
+          reject(e);
         } finally {
           setRelayPriority(undefined);
           this.pregenRunning--;
           this.drainPregenQueue(apiKey);
         }
       })();
-      this.plugin.qaCache.set(card.path, promise);
     }
   }
 
@@ -155,7 +174,6 @@ export class PregenManager {
       "Solve Equation": async () => { const e = encodeSolveEquation(await generateSolveEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Order Steps": async () => { const e = encodeOrderSteps(await generateOrderSteps(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Correct the Mistake": async () => { const r = await generateCorrectMistake(body, apiKey, model); return [make(r.incorrect, r.corrected)]; },
-      "Explain Why": async () => { const r = await generateExplainWhy(body, apiKey, model); return [make(r.question, r.answer)]; },
       "True/False": async () => { const r = await generateTrueFalse(body, apiKey, model); return [make(r.statement, r.answer)]; },
       "Assemble Equation": async () => { const e = encodeAssembleEquation(await generateAssembleEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
     };
@@ -164,7 +182,7 @@ export class PregenManager {
     if (!gen) return [];
     let variants = await gen();
 
-    const QC_TYPES: Set<string> = new Set(["Q&A", "Explain Why"]);
+    const QC_TYPES: Set<string> = new Set(["Q&A"]);
     if (QC_TYPES.has(type)) {
       const stdResults = await Promise.allSettled(
         variants.map(v => standardizeQuestion(body, v.question, v.answer, apiKey)),
@@ -173,6 +191,9 @@ export class PregenManager {
         const r = stdResults[i];
         if (r.status === "fulfilled" && r.value.question && r.value.answer) {
           if (r.value.reject) {
+            if (r.value.reject_reason) {
+              console.debug(`[Iris QC] rejected: ${r.value.reject_reason}`);
+            }
             variants[i] = { ...variants[i], suspended: true };
           } else {
             variants[i] = { ...variants[i], question: r.value.question, answer: r.value.answer };

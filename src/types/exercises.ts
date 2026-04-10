@@ -7,7 +7,6 @@ export const EXERCISE_TYPES = [
   "Assemble Equation",
   "Order Steps",
   "Correct the Mistake",
-  "Explain Why",
 ] as const;
 
 export type ExerciseType = (typeof EXERCISE_TYPES)[number];
@@ -22,7 +21,6 @@ export const TYPE_PRIORITY: ExerciseType[] = [
   "Order Steps",
   "Assemble Equation",
   "Solve Equation",
-  "Explain Why",        // QC pass doubles cost
 ];
 
 export interface QAVariant {

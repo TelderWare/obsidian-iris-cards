@@ -66,8 +66,8 @@ export function updateStability(stability: number, correct: boolean, difficulty 
 }
 
 /** Update difficulty after a review. */
-export function updateDifficulty(difficulty: number, correct: boolean): number {
-  const delta = correct ? D_CORRECT_DELTA : D_INCORRECT_DELTA;
+export function updateDifficulty(difficulty: number, correct: boolean, softRetry = false): number {
+  const delta = correct ? D_CORRECT_DELTA : (softRetry ? D_INCORRECT_DELTA * 0.5 : D_INCORRECT_DELTA);
   return clamp(difficulty + delta, D_MIN, D_MAX);
 }
 
@@ -112,6 +112,7 @@ export function getDueCards(app: App, cardsFolder: string, offsetDays = 0, modul
   const scored: { file: TFile; overdueRatio: number }[] = [];
   forEachCard(app, cardsFolder, (file, fm) => {
     if (fm?.["all-suspended"]) return;
+    if (fm?.["ai-selected"]) return;
     if (moduleFilter && moduleFilter.size > 0 && !moduleFilter.has(fm?.["module"] as string)) return;
     const lastReviewed = (fm?.["last-reviewed"] as string) ?? null;
     const dt = elapsedDays(lastReviewed, offsetDays);
@@ -141,7 +142,7 @@ export function getAllCards(app: App, cardsFolder: string, moduleFilter?: Set<st
 }
 
 /** Sort cards by basename so sibling facts stay in extraction order. */
-function sortByFilename(cards: TFile[]): TFile[] {
+export function sortByFilename(cards: TFile[]): TFile[] {
   return cards.sort((a, b) => a.basename.localeCompare(b.basename, undefined, { numeric: true }));
 }
 
@@ -150,6 +151,7 @@ export function countDueFromCache(app: App, cardsFolder: string, offsetDays = 0,
   let count = 0;
   forEachCard(app, cardsFolder, (file, fm) => {
     if (fm?.["all-suspended"]) return;
+    if (fm?.["ai-selected"]) return;
     const lastReviewed = (fm?.["last-reviewed"] as string) ?? null;
     const dt = elapsedDays(lastReviewed, offsetDays);
     if (!isFinite(dt)) { count++; return; }

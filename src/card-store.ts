@@ -44,7 +44,7 @@ export class CardStore {
   async createCard(
     cardsFolder: string,
     body: string,
-    source?: { file: TFile; module?: string; date?: string; aiSelected?: boolean },
+    source?: { file: TFile; contentFile?: TFile; module?: string; date?: string; aiSelected?: boolean },
   ): Promise<TFile> {
     await this.ensureFolderExists(cardsFolder);
     const uid = String(Date.now());
@@ -60,6 +60,9 @@ export class CardStore {
       if (source?.module != null) fm["module"] = source.module;
       if (source?.date != null) fm["date"] = source.date;
       if (source?.aiSelected) fm["ai-selected"] = true;
+      if (source?.contentFile && source.contentFile.path !== source.file.path) {
+        fm["content-note"] = `[[${source.contentFile.basename}]]`;
+      }
     });
 
     return newFile;
@@ -75,6 +78,7 @@ export class CardStore {
     questionShown?: string,
     userAnswer?: string,
     elapsedMs?: number,
+    softRetry = false,
   ): Promise<void> {
     // Read variant difficulty before updating frontmatter so the stability
     // calculation uses the reviewed variant's difficulty, not the file-level one.
@@ -89,8 +93,13 @@ export class CardStore {
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       const S = getStability(fm);
       const D = variantD ?? getDifficulty(fm);
-      fm["stability"] = updateStability(S, correct, D, elapsedMs);
-      fm["difficulty"] = updateDifficulty(getDifficulty(fm), correct);
+      let newS = updateStability(S, correct, D, elapsedMs);
+      if (softRetry && correct) {
+        // Half the stability growth on a teaching-mode retry
+        newS = S + (newS - S) * 0.5;
+      }
+      fm["stability"] = newS;
+      fm["difficulty"] = updateDifficulty(getDifficulty(fm), correct, softRetry);
       delete fm["box"];
       fm["last-reviewed"] = new Date().toISOString();
       fm["repetitions"] = (fm["repetitions"] ?? 0) + 1;
@@ -106,7 +115,7 @@ export class CardStore {
         const updated: QAVariant = {
           ...v,
           lastReviewed: new Date().toISOString(),
-          difficulty: updateDifficulty(vD, correct),
+          difficulty: updateDifficulty(vD, correct, softRetry),
         };
 
         if (correct && userAnswer) {

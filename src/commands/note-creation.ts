@@ -161,7 +161,7 @@ export async function memorizeSelection(
     date: srcFm?.["date"] ?? undefined,
   } : undefined);
 
-  if (apiKey) plugin.pregen.pregenerateQA(newFile, apiKey);
+  if (apiKey || (plugin.app as any).irisRelay) plugin.pregen.pregenerateQA(newFile, apiKey);
 
   const ref = plugin.app.metadataCache.on("resolved", () => {
     plugin.app.metadataCache.offref(ref);

@@ -20,6 +20,8 @@ const HOTKEYS_PATH = ".obsidian/hotkeys.json";
 export default class IrisCardsPlugin extends Plugin {
   settings: IrisCardsSettings = DEFAULT_SETTINGS;
   qaCache: Map<string, Promise<QAVariant[]>> = new Map();
+  /** When set, the next review view load will use these cards instead of querying due cards. */
+  pendingQuizCards: TFile[] | null = null;
   cardStore!: CardStore;
   pregen!: PregenManager;
   private ribbonIconEl: HTMLElement | null = null;
@@ -57,13 +59,13 @@ export default class IrisCardsPlugin extends Plugin {
 
     this.addCommand({
       id: "generate-quiz",
-      name: "Generate quiz",
+      name: "Quiz",
       callback: () => generateQuiz(this),
     });
 
     this.addCommand({
       id: "generate-quiz-linked",
-      name: "Generate quiz from linked note",
+      name: "Quiz from linked note",
       callback: () => generateQuizFromLinkedNote(this),
     });
 
@@ -183,14 +185,15 @@ export default class IrisCardsPlugin extends Plugin {
     }
   }
 
-  private async activateReviewView(): Promise<void> {
+  async activateReviewView(): Promise<{ reused: boolean }> {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_REVIEW);
     if (existing.length > 0) {
       this.app.workspace.revealLeaf(existing[0]);
-      return;
+      return { reused: true };
     }
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_REVIEW, active: true });
     this.app.workspace.revealLeaf(leaf);
+    return { reused: false };
   }
 }

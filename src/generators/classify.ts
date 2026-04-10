@@ -34,10 +34,6 @@ A version of the fact with a plausible error introduced; the learner identifies 
 The equation is shown with one term blanked out; the learner fills in the missing piece.
 - Eligible when: the fact contains a named equation or formula with at least two distinct variables or constants.
 - Ineligible when: the fact is purely qualitative, or the equation has only one term.
-### Explain Why
-A question asking the learner to explain the causal or mechanistic reason behind the fact.
-- Eligible when: there is a genuine reason — mechanistic, logical, evolutionary, physical — behind the fact that a learner should understand.
-- Ineligible when: the fact is a convention, arbitrary label, or definition with no underlying why.
 ## Input
 A single fact.
 ## Output

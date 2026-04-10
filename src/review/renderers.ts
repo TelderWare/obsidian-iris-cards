@@ -2,6 +2,7 @@ import { TFile, MarkdownRenderer, setIcon } from "obsidian";
 import { type QAVariant } from "../types/exercises";
 import { parseQABlock } from "../types/qa-block";
 import { markAnswer, appealAnswer } from "../generators/qa";
+import { hasRelay } from "../api/client";
 import { parseClozeTerms, occludeCloze } from "../generators/cloze";
 import { decodeMC } from "../generators/multiple-choice";
 import { decodeSolveEquation, randomizeKnowns, evaluateFormula, roundToSigFigs, checkNumericalAnswer } from "../generators/solve-equation";
@@ -9,19 +10,177 @@ import { decodeOrderSteps, shuffleArray } from "../generators/order-steps";
 import { updateStability, getStability, getDifficulty, updateDifficulty } from "../leitner";
 import { type ReviewView, normalizeAnswer } from "./review-view";
 
+// ─── Answer Handler ─────────────────────────────────────────────────────
+
+/** Callback renderers invoke when the user answers. Encapsulates timer, feedback, rating, and teaching mode. */
+type AnswerFn = (correct: boolean, userAnswer?: string) => Promise<void>;
+
+/** Extract the heading section from the content note that a card's fact was derived from. */
+async function extractHeadingSection(view: ReviewView, cardFile: TFile): Promise<string | null> {
+  const fm = view.app.metadataCache.getFileCache(cardFile)?.frontmatter;
+
+  const noteLink = fm?.["content-note"] ?? fm?.["parent-note"];
+  if (typeof noteLink !== "string") return null;
+
+  const linkMatch = noteLink.match(/^\[\[(.+?)(\|.+?)?\]\]$/);
+  if (!linkMatch) return null;
+
+  const contentFile = view.app.metadataCache.getFirstLinkpathDest(linkMatch[1], cardFile.path);
+  if (!contentFile) return null;
+
+  const sourceContent = await view.app.vault.cachedRead(contentFile);
+  const sourceLines = sourceContent.split("\n");
+
+  const cardContent = await view.app.vault.cachedRead(cardFile);
+  const ctxMatch = cardContent.match(/^\(Context:\s*(.+?)\)\s*$/m);
+  const breadcrumbParts = ctxMatch ? ctxMatch[1].split(",").map(s => s.trim()) : [];
+  const headingNames = breadcrumbParts.slice(1);
+
+  if (headingNames.length === 0) {
+    const stripped = sourceContent.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
+    return stripped || null;
+  }
+
+  const deepest = headingNames[headingNames.length - 1];
+  const headingRegex = /^(#{1,6})\s+(.+)$/;
+  let startLine = -1;
+  let startLevel = 0;
+
+  for (let i = 0; i < sourceLines.length; i++) {
+    const m = sourceLines[i].match(headingRegex);
+    if (m && m[2].trim() === deepest) {
+      startLine = i;
+      startLevel = m[1].length;
+      break;
+    }
+  }
+
+  if (startLine === -1) return null;
+
+  let endLine = sourceLines.length;
+  for (let i = startLine + 1; i < sourceLines.length; i++) {
+    const m = sourceLines[i].match(headingRegex);
+    if (m && m[1].length <= startLevel) {
+      endLine = i;
+      break;
+    }
+  }
+
+  const section = sourceLines.slice(startLine, endLine).join("\n").trim();
+  return section || null;
+}
+
+/** Pick a different variant for the same card (for teaching mode retry). */
+async function pickRetryVariant(view: ReviewView, cardFile: TFile, currentVariant: QAVariant): Promise<QAVariant> {
+  const cached = view.plugin.qaCache.get(cardFile.path);
+  if (!cached) return currentVariant;
+
+  let variants: QAVariant[];
+  try {
+    variants = await cached;
+  } catch {
+    return currentVariant;
+  }
+
+  const active = variants.filter(v => !v.suspended && v.question !== currentVariant.question);
+  if (active.length === 0) return currentVariant;
+  return active[Math.floor(Math.random() * active.length)];
+}
+
+/**
+ * Create the answer handler for a card. Captures the timer, feedback, rating,
+ * and teaching-mode logic so individual renderers only need to call answer(correct).
+ */
+function createAnswerHandler(
+  view: ReviewView,
+  card: HTMLElement,
+  cardFile: TFile,
+  variant: QAVariant,
+  softRetry: boolean,
+): AnswerFn {
+  const t0 = performance.now();
+  return async (correct: boolean, userAnswer?: string) => {
+    const elapsedMs = Math.round(performance.now() - t0);
+    const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
+    view.playFeedback(correct, record);
+
+    if (correct) {
+      await view.rateCard(cardFile, true, userAnswer, variant.question, elapsedMs, softRetry);
+      return;
+    }
+
+    // Wrong answer — check teaching mode
+    if (view.teachingMode && view.isQuiz && !softRetry) {
+      const extract = await extractHeadingSection(view, cardFile);
+      if (extract) {
+        const retryVariant = await pickRetryVariant(view, cardFile, variant);
+        card.style.minHeight = `${card.offsetHeight}px`;
+        card.addClass("iris-card-answered");
+        card.querySelectorAll(".iris-skip-card-btn, .iris-dontknow-btn, .iris-actions, .iris-show-btn").forEach(el => el.remove());
+        card.querySelectorAll<HTMLInputElement>(".iris-answer-input").forEach(el => { el.disabled = true; });
+        view.teachingState = { phase: "retry", cardFile, extract, retryVariant };
+        view.showTeachingModal(view.teachingState);
+        return;
+      }
+    }
+
+    await view.rateCard(cardFile, false, userAnswer, variant.question, elapsedMs, softRetry);
+  };
+}
+
+// ─── Shared Rendering Primitives ────────────────────────────────────────
+
+/** Manual reveal mode: question -> eye button -> answer -> right/wrong buttons. */
+async function renderManualReveal(
+  view: ReviewView, card: HTMLElement, answer: AnswerFn,
+  questionMd: string, answerMd: string,
+): Promise<void> {
+  const questionSection = card.createDiv({ cls: "iris-question" });
+  await MarkdownRenderer.render(view.app, questionMd, questionSection.createDiv(), "", view);
+
+  const showBtn = card.createEl("button", {
+    cls: "iris-show-btn",
+    attr: { "aria-label": "Show answer" },
+  });
+  setIcon(showBtn, "eye");
+
+  const answerSection = card.createDiv({ cls: "iris-answer iris-hidden" });
+  await MarkdownRenderer.render(view.app, answerMd, answerSection.createDiv(), "", view);
+
+  const actions = card.createDiv({ cls: "iris-actions iris-hidden" });
+
+  const wrongBtn = actions.createEl("button", { cls: "iris-wrong-btn", attr: { "aria-label": "Wrong" } });
+  setIcon(wrongBtn, "x");
+  wrongBtn.addEventListener("click", () => { answer(false); });
+
+  const rightBtn = actions.createEl("button", { cls: "iris-right-btn", attr: { "aria-label": "Right" } });
+  setIcon(rightBtn, "check");
+  rightBtn.addEventListener("click", () => { answer(true); });
+
+  showBtn.addEventListener("click", () => {
+    answerSection.removeClass("iris-hidden");
+    showBtn.addClass("iris-hidden");
+    actions.removeClass("iris-hidden");
+  });
+}
+
+// ─── Dispatch & Orchestration ───────────────────────────────────────────
+
 /** Dispatch to the correct type-specific renderer for a card element. */
-export async function renderVariantInto(view: ReviewView, card: HTMLElement, cardFile: TFile, variant: QAVariant, apiKey: string): Promise<void> {
+export async function renderVariantInto(
+  view: ReviewView, card: HTMLElement, cardFile: TFile, variant: QAVariant, answer: AnswerFn,
+): Promise<void> {
   const rendererMap: Record<string, () => Promise<void>> = {
     "Multiple Choice": async () => {
       const mc = decodeMC(variant.question, variant.answer);
-      await renderChoiceCard(view, card, cardFile, variant, {
+      await renderChoiceCard(view, card, variant, answer, {
         questionMd: mc.question,
         options: mc.options.map(o => ({ label: o.text, value: o.letter })),
         correct: mc.correct,
       });
     },
     "True/False": async () => {
-      await renderChoiceCard(view, card, cardFile, variant, {
+      await renderChoiceCard(view, card, variant, answer, {
         questionMd: `**True or false?**\n\n${variant.question}`,
         options: [
           { label: "True", value: "True", cls: "iris-tf-true" },
@@ -31,32 +190,42 @@ export async function renderVariantInto(view: ReviewView, card: HTMLElement, car
         optionsCls: "iris-tf-options",
       });
     },
-    "Cloze": () => renderCloze(view, card, cardFile, variant),
-    "Solve Equation": () => renderSolveEquation(view, card, cardFile, variant),
-    "Order Steps": () => renderOrderSteps(view, card, cardFile, variant),
+    "Cloze": () => renderOcclude(view, card, cardFile, variant, answer, {
+      source: variant.question,
+    }),
+    "Solve Equation": () => renderSolveEquation(view, card, cardFile, variant, answer),
+    "Order Steps": () => renderOrderSteps(view, card, cardFile, variant, answer),
     "Correct the Mistake": async () => {
-      await renderInputCard(view, card, cardFile, variant, {
+      await renderInputCard(view, card, cardFile, variant, answer, {
         questionMd: `**Find and correct the mistake:**\n\n${variant.question}`,
         answerMd: variant.answer,
+        autoSubmitOnMatch: true,
         llmMarker: {
-          apiKey,
           question: `The following statement contains a mistake: "${variant.question}"\nWhat is the corrected version?`,
           answer: variant.answer,
           acceptedAnswers: variant.acceptedAnswers,
         },
       });
     },
-    "Assemble Equation": () => renderAssembleEquation(view, card, cardFile, variant),
+    "Assemble Equation": () => renderOcclude(view, card, cardFile, variant, answer, {
+      source: variant.answer,
+      title: variant.question,
+      minTerms: 2,
+      errorText: "Malformed equation.",
+    }),
   };
-  await (rendererMap[variant.exerciseType] ?? (() => renderQA(view, card, cardFile, variant, apiKey)))();
+  await (rendererMap[variant.exerciseType] ?? (() => renderQA(view, card, cardFile, variant, answer)))();
 }
 
-export async function renderCurrentCard(view: ReviewView, body: HTMLDivElement, cardFile: TFile, variant: QAVariant, apiKey: string): Promise<void> {
+export async function renderCurrentCard(
+  view: ReviewView, body: HTMLDivElement, cardFile: TFile, variant: QAVariant, softRetry = false,
+): Promise<void> {
   body.querySelectorAll(".iris-card-preview").forEach((el) => el.remove());
   const card = body.createDiv({ cls: "iris-card" });
   view.currentCardEl = card;
 
-  await renderVariantInto(view, card, cardFile, variant, apiKey);
+  const answer = createAnswerHandler(view, card, cardFile, variant, softRetry);
+  await renderVariantInto(view, card, cardFile, variant, answer);
 
   // Suspend button — permanently disables this question variant
   const suspendBtn = card.createEl("button", {
@@ -87,6 +256,16 @@ export async function renderCurrentCard(view: ReviewView, body: HTMLDivElement, 
     }
   }
 
+  // Don't know button — counts as wrong without attempting
+  const dontKnowBtn = card.createEl("button", {
+    cls: "iris-card-icon iris-dontknow-btn",
+    attr: { "aria-label": "Don\u2019t know" },
+  });
+  setIcon(dontKnowBtn, "circle-slash");
+  dontKnowBtn.addEventListener("click", () => {
+    view.rateCard(cardFile, false, undefined, variant.question, undefined, softRetry);
+  });
+
   // Skip button — moves card to end without affecting box
   const skipBtn = card.createEl("button", {
     cls: "iris-card-icon iris-skip-card-btn",
@@ -101,29 +280,29 @@ export async function renderCurrentCard(view: ReviewView, body: HTMLDivElement, 
 
   view.scrollToCenter(card);
 
-  // Render previews as inert (no input focus, no click handlers)
   renderUpcomingPreviews(view, body);
 }
 
-// ─── Shared Input Card Helper ───────────────────────────────────────────────
+// ─── Shared Input Card Helper ───────────────────────────────────────────
 
 /**
- * Renders a card with: question → text input → hidden answer → marking.
- * Supports three modes via opts:
- *   - checkAnswer only: instant local check (Cloze, Solve Equation, Assemble Equation)
- *   - llmMarker: exact-match shortcut → LLM fallback (Q&A autoMark, Correct the Mistake, Explain Why)
- *   - Both can have autoSubmitOnMatch for auto-submit when typed answer matches locally
+ * Renders a card with: question -> text input -> hidden answer -> marking.
+ * Grading modes:
+ *   - checkAnswer: local check (Cloze, Solve Equation, Assemble Equation)
+ *   - llmMarker: exact-match shortcut then LLM fallback (Q&A, Correct the Mistake)
+ *   - Both: local check for auto-submit + LLM fallback for grading
  */
-export async function renderInputCard(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant,
+async function renderInputCard(
+  view: ReviewView,
+  card: HTMLElement, cardFile: TFile, variant: QAVariant,
+  answer: AnswerFn,
   opts: {
     questionMd: string;
     answerMd: string;
     checkAnswer?: (input: string) => boolean;
     autoSubmitOnMatch?: boolean;
     inputMode?: string;
-    llmMarker?: { apiKey: string; question: string; answer: string; acceptedAnswers?: string[] };
+    llmMarker?: { question: string; answer: string; acceptedAnswers?: string[] };
   },
 ): Promise<void> {
   const questionSection = card.createDiv({ cls: "iris-question" });
@@ -141,7 +320,6 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
 
   input.focus();
 
-  const t0 = performance.now();
   let answered = false;
 
   const showResult = (correct: boolean) => {
@@ -153,7 +331,7 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
     input.disabled = true;
   };
 
-  // Build exact-match checker for LLM marker mode
+  // Build exact-match checker from LLM marker for shortcut grading
   const isExactMatch = opts.llmMarker
     ? (val: string) => {
         const norm = normalizeAnswer(val);
@@ -165,53 +343,43 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
   const submitAnswer = async () => {
     if (answered) return;
     answered = true;
-    const elapsedMs = Math.round(performance.now() - t0);
     const userAnswer = input.value.trim();
-    const isRecord = (ms: number, correct: boolean) => correct && variant.recordMs != null && ms < variant.recordMs;
 
     if (!userAnswer) {
-      view.playFeedback(false);
       showResult(false);
-      await new Promise(r => setTimeout(r, 1200));
-      await view.rateCard(cardFile, false, undefined, variant.question, elapsedMs);
+      await answer(false);
       return;
     }
 
-    // Local check mode (Cloze, Solve Equation, Assemble Equation)
-    if (opts.checkAnswer && !opts.llmMarker) {
-      const correct = opts.checkAnswer(userAnswer);
-      view.playFeedback(correct, isRecord(elapsedMs, correct));
-      showResult(correct);
-      if (!correct) {
-        addAppealButton(view, card, cardFile, variant, userAnswer, markingEl, opts.questionMd);
-      }
-      await view.rateCard(cardFile, correct, correct ? userAnswer : undefined, variant.question, elapsedMs);
-      return;
-    }
-
-    // LLM marker mode: try exact match first, then fall back to LLM
-    if (isExactMatch?.(userAnswer)) {
-      view.playFeedback(true, isRecord(elapsedMs, true));
+    // Local check (custom checker or exact-match shortcut)
+    const localCheck = opts.checkAnswer ?? isExactMatch;
+    if (localCheck?.(userAnswer)) {
       showResult(true);
-      await new Promise(r => setTimeout(r, 800));
-      await view.rateCard(cardFile, true, userAnswer, variant.question, elapsedMs);
+      await answer(true, userAnswer);
       return;
     }
 
+    // No LLM marker — local check is final
+    if (!opts.llmMarker) {
+      showResult(false);
+      addAppealButton(view, card, cardFile, variant, userAnswer, markingEl, opts.questionMd);
+      await answer(false, userAnswer);
+      return;
+    }
+
+    // LLM fallback marking
     input.disabled = true;
     const marking = card.createEl("p", { text: "Marking\u2026", cls: "iris-loading" });
     try {
+      const apiKey = view.plugin.settings.anthropicApiKey;
       const correct = await markAnswer(
-        opts.llmMarker!.question, opts.llmMarker!.answer, userAnswer,
-        opts.llmMarker!.apiKey, view.plugin.settings.claudeModel,
+        opts.llmMarker.question, opts.llmMarker.answer, userAnswer,
+        apiKey, view.plugin.settings.claudeModel,
       );
       marking.remove();
-      view.playFeedback(correct, isRecord(elapsedMs, correct));
       showResult(correct);
-      if (!correct) {
-        addAppealButton(view, card, cardFile, variant, userAnswer, markingEl);
-      }
-      await view.rateCard(cardFile, correct, correct ? userAnswer : undefined, variant.question, elapsedMs);
+      if (!correct) addAppealButton(view, card, cardFile, variant, userAnswer, markingEl);
+      await answer(correct, userAnswer);
     } catch (e) {
       marking.remove();
       answered = false;
@@ -239,16 +407,16 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
 // ─── Appeal Helper ─────────────────────────────────────────────────────
 
 function addAppealButton(
-view: ReviewView,
-card: HTMLElement,
-cardFile: TFile,
-variant: QAVariant,
-userAnswer: string,
-markingEl: HTMLElement,
-appealQuestion?: string,
+  view: ReviewView,
+  card: HTMLElement,
+  cardFile: TFile,
+  variant: QAVariant,
+  userAnswer: string,
+  markingEl: HTMLElement,
+  appealQuestion?: string,
 ): void {
   const apiKey = view.plugin.settings.anthropicApiKey;
-  if (!apiKey) return;
+  if (!apiKey && !hasRelay()) return;
 
   const preFm = view.app.metadataCache.getFileCache(cardFile)?.frontmatter;
   const preStability = getStability(preFm);
@@ -300,19 +468,20 @@ appealQuestion?: string,
   });
 }
 
-// ─── Q&A Renderer ──────────────────────────────────────────────────
+// ─── Type-Specific Renderers ────────────────────────────────────────────
 
-export async function renderQA(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant, apiKey: string,
+// --- Q&A ---
+
+async function renderQA(
+  view: ReviewView,
+  card: HTMLElement, cardFile: TFile, variant: QAVariant, answer: AnswerFn,
 ): Promise<void> {
   if (view.plugin.settings.autoMark) {
-    await renderInputCard(view, card, cardFile, variant, {
+    await renderInputCard(view, card, cardFile, variant, answer, {
       questionMd: variant.question,
       answerMd: variant.answer,
       autoSubmitOnMatch: true,
       llmMarker: {
-        apiKey,
         question: variant.question,
         answer: variant.answer,
         acceptedAnswers: variant.acceptedAnswers,
@@ -321,51 +490,14 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant, apiKey: string,
     return;
   }
 
-  const t0 = performance.now();
-
-  const questionSection = card.createDiv({ cls: "iris-question" });
-  await MarkdownRenderer.render(view.app, variant.question, questionSection.createDiv(), "", view);
-
-  const showBtn = card.createEl("button", {
-    cls: "iris-show-btn",
-    attr: { "aria-label": "Show answer" },
-  });
-  setIcon(showBtn, "eye");
-
-  const answerSection = card.createDiv({ cls: "iris-answer iris-hidden" });
-  await MarkdownRenderer.render(view.app, variant.answer, answerSection.createDiv(), "", view);
-
-  const actions = card.createDiv({ cls: "iris-actions iris-hidden" });
-
-  const wrongBtn = actions.createEl("button", { cls: "iris-wrong-btn", attr: { "aria-label": "Wrong" } });
-  setIcon(wrongBtn, "x");
-  wrongBtn.addEventListener("click", () => {
-    const elapsedMs = Math.round(performance.now() - t0);
-    view.playFeedback(false);
-    view.rateCard(cardFile, false, undefined, variant.question, elapsedMs);
-  });
-
-  const rightBtn = actions.createEl("button", { cls: "iris-right-btn", attr: { "aria-label": "Right" } });
-  setIcon(rightBtn, "check");
-  rightBtn.addEventListener("click", () => {
-    const elapsedMs = Math.round(performance.now() - t0);
-    const record = variant.recordMs != null && elapsedMs < variant.recordMs;
-    view.playFeedback(true, record);
-    view.rateCard(cardFile, true, undefined, variant.question, elapsedMs);
-  });
-
-  showBtn.addEventListener("click", () => {
-    answerSection.removeClass("iris-hidden");
-    showBtn.addClass("iris-hidden");
-    actions.removeClass("iris-hidden");
-  });
+  await renderManualReveal(view, card, answer, variant.question, variant.answer);
 }
 
-// ─── Choice Card Renderer (MC + True/False) ────────────────────────────
+// --- Choice (Multiple Choice + True/False) ---
 
-export async function renderChoiceCard(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant,
+async function renderChoiceCard(
+  view: ReviewView,
+  card: HTMLElement, variant: QAVariant, answer: AnswerFn,
   opts: { questionMd: string; options: { label: string; value: string; cls?: string }[]; correct: string; optionsCls?: string },
 ): Promise<void> {
   const questionSection = card.createDiv({ cls: "iris-question" });
@@ -373,7 +505,6 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
 
   const optionsSection = card.createDiv({ cls: `iris-mc-options${opts.optionsCls ? " " + opts.optionsCls : ""}` });
   let answered = false;
-  const t0 = performance.now();
 
   for (const opt of opts.options) {
     const btn = optionsSection.createEl("button", {
@@ -385,11 +516,8 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
     btn.addEventListener("click", async () => {
       if (answered) return;
       answered = true;
-      const elapsedMs = Math.round(performance.now() - t0);
 
       const correct = opt.value === opts.correct;
-      const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-      view.playFeedback(correct, record);
 
       for (const child of Array.from(optionsSection.querySelectorAll<HTMLButtonElement>(".iris-mc-option"))) {
         child.disabled = true;
@@ -400,46 +528,69 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
         }
       }
 
-      await view.rateCard(cardFile, correct, undefined, variant.question, elapsedMs);
+      await answer(correct);
     });
   }
 }
 
-// ─── Cloze Renderer ──────────────────────────────────────────────────
+// --- Occlude (Cloze + Assemble Equation) ---
 
-export async function renderCloze(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant,
+interface OccludeOpts {
+  source: string;
+  title?: string;
+  minTerms?: number;
+  errorText?: string;
+}
+
+async function renderOcclude(
+  view: ReviewView,
+  card: HTMLElement, cardFile: TFile, variant: QAVariant,
+  answer: AnswerFn, opts: OccludeOpts,
 ): Promise<void> {
-  const sentence = variant.question;
-  const terms = parseClozeTerms(sentence);
-  if (terms.length === 0) {
-    card.createEl("p", { text: "No cloze terms found in this card.", cls: "iris-error" });
+  const terms = parseClozeTerms(opts.source);
+  if (terms.length < (opts.minTerms ?? 1)) {
+    card.createEl("p", { text: opts.errorText ?? "No cloze terms found in this card.", cls: "iris-error" });
     return;
   }
 
   const rs = view.getRenderState(cardFile, variant);
   const occludeIdx = (rs.clozeIdx as number) ?? (rs.clozeIdx = Math.floor(Math.random() * terms.length));
-  const { display, answer } = occludeCloze(sentence, occludeIdx);
-  const allAnswers = [answer, ...variant.acceptedAnswers];
+  const { display, answer: term } = occludeCloze(opts.source, occludeIdx);
 
-  // Full sentence with the occluded term bolded
   let ti = 0;
-  const filled = sentence.replace(/\*([^*]+)\*/g, (_, term) => ti++ === occludeIdx ? `**${term}**` : term);
+  const filled = opts.source.replace(/\*([^*]+)\*/g, (_, t) => ti++ === occludeIdx ? `**${t}**` : t);
 
-  await renderInputCard(view, card, cardFile, variant, {
-    questionMd: display,
-    answerMd: filled,
-    checkAnswer: (val) => allAnswers.some(a => normalizeAnswer(a) === normalizeAnswer(val)),
-    autoSubmitOnMatch: true,
-  });
+  const fmtQ = opts.title ? `**${opts.title}**\n\n${display}` : display;
+  const fmtA = opts.title ? `**${opts.title}**\n\n${filled}` : filled;
+
+  if (view.plugin.settings.autoMark) {
+    const apiKey = view.plugin.settings.anthropicApiKey;
+    const useLlm = apiKey || hasRelay();
+    await renderInputCard(view, card, cardFile, variant, answer, {
+      questionMd: fmtQ,
+      answerMd: fmtA,
+      autoSubmitOnMatch: true,
+      llmMarker: useLlm ? {
+        question: opts.title ? `${opts.title}\n${display}` : display,
+        answer: term,
+        acceptedAnswers: variant.acceptedAnswers,
+      } : undefined,
+      checkAnswer: (val) => {
+        const norm = normalizeAnswer(val);
+        return [term, ...variant.acceptedAnswers].some(a => normalizeAnswer(a) === norm);
+      },
+    });
+    return;
+  }
+
+  await renderManualReveal(view, card, answer, fmtQ, fmtA);
 }
 
-// ─── Solve Equation Renderer ──────────────────────────────────────────
+// --- Solve Equation ---
 
-export async function renderSolveEquation(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant,
+async function renderSolveEquation(
+  view: ReviewView,
+  card: HTMLElement, cardFile: TFile, variant: QAVariant, answer: AnswerFn,
 ): Promise<void> {
   let se;
   try {
@@ -466,7 +617,7 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
     .join("\n");
   const display = `${se.scenario}\n\n${knownLines}\n\n**Solve for:** ${se.target.name} (*${se.target.symbol}*) in ${se.target.units}`;
 
-  await renderInputCard(view, card, cardFile, variant, {
+  await renderInputCard(view, card, cardFile, variant, answer, {
     questionMd: display,
     answerMd: `${expected} ${se.target.units}`,
     checkAnswer: (val) => {
@@ -477,42 +628,11 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
   });
 }
 
-// ─── Assemble Equation Renderer ────────────────────────────────────────
+// --- Order Steps ---
 
-export async function renderAssembleEquation(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant,
-): Promise<void> {
-  const title = variant.question;
-  const equation = variant.answer;
-  const terms = parseClozeTerms(equation);
-  if (terms.length < 2) {
-    card.createEl("p", { text: "Malformed equation.", cls: "iris-error" });
-    return;
-  }
-
-  const rs = view.getRenderState(cardFile, variant);
-  const occludeIdx = (rs.clozeIdx as number) ?? (rs.clozeIdx = Math.floor(Math.random() * terms.length));
-  const { display, answer } = occludeCloze(equation, occludeIdx);
-  const allAnswers = [answer, ...variant.acceptedAnswers];
-
-  // Full equation with the occluded term bolded
-  let ti = 0;
-  const filled = equation.replace(/\*([^*]+)\*/g, (_, term) => ti++ === occludeIdx ? `**${term}**` : term);
-
-  await renderInputCard(view, card, cardFile, variant, {
-    questionMd: `**${title}**\n\n${display}`,
-    answerMd: `**${title}**\n\n${filled}`,
-    checkAnswer: (val) => allAnswers.some(a => normalizeAnswer(a) === normalizeAnswer(val)),
-    autoSubmitOnMatch: true,
-  });
-}
-
-// ─── Order Steps Renderer ──────────────────────────────────────────────
-
-export async function renderOrderSteps(
-view: ReviewView,
-card: HTMLElement, cardFile: TFile, variant: QAVariant,
+async function renderOrderSteps(
+  view: ReviewView,
+  card: HTMLElement, cardFile: TFile, variant: QAVariant, answer: AnswerFn,
 ): Promise<void> {
   let os;
   try {
@@ -530,7 +650,6 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
   const questionSection = card.createDiv({ cls: "iris-question" });
   await MarkdownRenderer.render(view.app, `**Order the steps:** ${os.title}`, questionSection.createDiv(), "", view);
 
-  // Drag-to-reorder list
   const listEl = card.createDiv({ cls: "iris-order-list" });
   const rs = view.getRenderState(cardFile, variant);
   const order: { text: string; origIdx: number }[] =
@@ -538,7 +657,6 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
     (rs.shuffledOrder = shuffleArray(os.steps.map((text, origIdx) => ({ text, origIdx }))));
   let answered = false;
   let dragIdx: number | null = null;
-  const t0 = performance.now();
 
   const renderList = () => {
     listEl.empty();
@@ -595,7 +713,6 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
 
   renderList();
 
-  // Check button
   const checkBtn = card.createEl("button", {
     cls: "iris-order-check",
     text: "Check",
@@ -604,21 +721,16 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
   checkBtn.addEventListener("click", async () => {
     if (answered) return;
     answered = true;
-    const elapsedMs = Math.round(performance.now() - t0);
     checkBtn.remove();
 
     const correct = order.every((item, i) => item.text === os.steps[i]);
-    const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-    view.playFeedback(correct, record);
 
-    // Mark each row correct/incorrect and disable dragging
     const rows = Array.from(listEl.querySelectorAll(".iris-order-row"));
     rows.forEach((row, i) => {
       row.setAttribute("draggable", "false");
       row.addClass(order[i].text === os.steps[i] ? "iris-order-correct" : "iris-order-incorrect");
     });
 
-    // Show correct order
     const answerSection = card.createDiv({ cls: "iris-answer" });
     const correctMd = os.steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
     await MarkdownRenderer.render(view.app, correctMd, answerSection.createDiv(), "", view);
@@ -627,15 +739,20 @@ card: HTMLElement, cardFile: TFile, variant: QAVariant,
     markingEl.setText(correct ? "Correct" : "Incorrect");
     markingEl.addClass(correct ? "iris-marking-correct" : "iris-marking-incorrect");
 
-    await view.rateCard(cardFile, correct, undefined, variant.question, elapsedMs);
+    await answer(correct);
   });
 }
 
+// ─── Upcoming Previews ──────────────────────────────────────────────────
+
 export async function renderUpcomingPreviews(view: ReviewView, body: HTMLDivElement): Promise<void> {
-  const apiKey = view.plugin.settings.anthropicApiKey ?? "";
+  const genId = ++view.previewGenId;
+  const noop: AnswerFn = async () => {};
   for (let i = 1; i < view.dueCards.length; i++) {
+    if (view.previewGenId !== genId) return;
     const file = view.dueCards[i];
     const content = await view.app.vault.cachedRead(file);
+    if (view.previewGenId !== genId) return;
     const parsed = parseQABlock(content);
     const active = parsed.variants.filter(v => !v.suspended);
     if (active.length === 0) continue;
@@ -649,6 +766,6 @@ export async function renderUpcomingPreviews(view: ReviewView, body: HTMLDivElem
       return v.lastReviewed < best.lastReviewed ? v : best;
     }, active[0]);
     const preview = body.createDiv({ cls: "iris-card iris-card-preview", attr: { inert: "" } });
-    await renderVariantInto(view, preview, file, variant, apiKey);
+    await renderVariantInto(view, preview, file, variant, noop);
   }
 }

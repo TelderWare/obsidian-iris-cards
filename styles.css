@@ -44,6 +44,39 @@
   display: none;
 }
 
+.iris-compact {
+  padding: 0;
+}
+
+.iris-compact .iris-scroll-body {
+  gap: 0;
+  padding: 0;
+  scroll-snap-type: y mandatory;
+  align-items: stretch;
+}
+
+.iris-compact .iris-scroll-body::before,
+.iris-compact .iris-scroll-body::after {
+  display: none;
+}
+
+.iris-compact .iris-done-card > * {
+  display: none;
+}
+
+.iris-compact .iris-card {
+  min-height: 100%;
+  height: max-content;
+  justify-content: center;
+  border-radius: 0;
+  border: none;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  padding-top: 48px;
+  padding-bottom: 48px;
+  box-sizing: border-box;
+}
+
 .iris-header-left,
 .iris-header-right {
   flex: 1;
@@ -148,16 +181,13 @@
   flex-direction: column;
   gap: 24px;
   padding: 24px 0;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 .iris-scroll-body::-webkit-scrollbar {
-  width: 4px;
-}
-
-.iris-scroll-body::-webkit-scrollbar-thumb {
-  background: var(--background-modifier-border);
-  border-radius: 4px;
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .iris-scroll-body::before,
@@ -173,6 +203,10 @@
   align-items: center;
   text-align: center;
   padding: 32px 24px;
+  min-width: 0;
+  max-width: 800px;
+  width: 100%;
+  align-self: center;
   border-radius: 8px;
   border: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
@@ -190,12 +224,12 @@
 .iris-question {
   font-size: 1.4em;
   line-height: 1.5;
-  max-width: 600px;
+  max-width: 680px;
   width: 100%;
 }
 
 .iris-answer {
-  max-width: 600px;
+  max-width: 680px;
   width: 100%;
   margin-top: 24px;
   padding-top: 16px;
@@ -273,7 +307,7 @@ button.iris-right-btn {
 
 
 .iris-user-answer {
-  max-width: 600px;
+  max-width: 680px;
   width: 100%;
   margin-top: 24px;
   display: flex;
@@ -308,7 +342,7 @@ input.iris-answer-input:focus {
 }
 
 .iris-marking {
-  margin-top: 16px;
+  margin-top: 24px;
   font-weight: 600;
   font-size: 1.1em;
 }
@@ -422,6 +456,7 @@ button.iris-card-icon {
 .iris-goback-btn { top: 10px; left: 14px; }
 .iris-suspend-btn { top: 10px; left: 14px; }
 .iris-parent-btn { top: 10px; right: 14px; }
+.iris-dontknow-btn { bottom: 10px; left: 14px; }
 .iris-skip-card-btn { bottom: 10px; right: 14px; }
 .iris-appeal-icon { bottom: 10px; left: 14px; }
 
@@ -507,9 +542,11 @@ button.iris-card-icon {
 
 .iris-mc-option {
   width: 100%;
-  padding: 20px 24px;
+  padding: 28px 16px;
   font-size: 1.15em;
-  text-align: left;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: break-word;
   border: 1px solid transparent;
   border-radius: 8px;
   background: rgba(var(--interactive-accent-rgb), 0.08);
@@ -571,4 +608,40 @@ button.iris-card-icon {
 .iris-mc-option.iris-tf-false:hover:not(:disabled) {
   background: rgba(var(--color-red-rgb, 200, 0, 0), 0.35);
   border-color: rgba(var(--color-red-rgb, 200, 0, 0), 0.45);
+}
+
+/* Teaching mode — modal */
+.modal:has(.iris-teaching-modal) {
+  width: 90vw;
+  max-width: 800px;
+  max-height: 80vh;
+}
+
+.iris-teaching-modal {
+  padding: 8px 4px;
+}
+
+.iris-teaching-modal .iris-teaching-content {
+  max-height: 60vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 20px 24px;
+  font-size: 1em;
+  line-height: 1.7;
+}
+
+.iris-teaching-modal .iris-retry-btn {
+  margin-top: 20px;
+  padding: 8px 24px;
+  border-radius: 6px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  float: right;
+}
+
+.iris-teaching-modal .iris-retry-btn:hover {
+  opacity: 0.9;
 }
