@@ -33,7 +33,6 @@ export class ReviewView extends ItemView {
   scrollAnimId = 0;
   previewGenId = 0;
   renderStateCache = new Map<string, Record<string, unknown>>();
-  private resizeObs: ResizeObserver | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: IrisCardsPlugin) {
     super(leaf);
@@ -60,8 +59,6 @@ export class ReviewView extends ItemView {
 
   async onClose(): Promise<void> {
     this.clearDoneCheck();
-    this.resizeObs?.disconnect();
-    this.resizeObs = null;
     this.sndCorrect = null;
     this.sndIncorrect = null;
     this.layoutReady = false;
@@ -201,15 +198,6 @@ export class ReviewView extends ItemView {
 
     // Scrollable body
     this.scrollBody = container.createDiv({ cls: "iris-scroll-body" });
-
-    // Compact mode: hide header when the tab is narrow
-    this.resizeObs?.disconnect();
-    this.resizeObs = new ResizeObserver((entries) => {
-      for (const e of entries) {
-        container.toggleClass("iris-compact", e.contentRect.height < 700);
-      }
-    });
-    this.resizeObs.observe(container);
 
     this.layoutReady = true;
   }

@@ -40,43 +40,6 @@
   flex-shrink: 0;
 }
 
-.iris-compact > .iris-header {
-  display: none;
-}
-
-.iris-compact {
-  padding: 0;
-}
-
-.iris-compact .iris-scroll-body {
-  gap: 0;
-  padding: 0;
-  scroll-snap-type: y mandatory;
-  align-items: stretch;
-}
-
-.iris-compact .iris-scroll-body::before,
-.iris-compact .iris-scroll-body::after {
-  display: none;
-}
-
-.iris-compact .iris-done-card > * {
-  display: none;
-}
-
-.iris-compact .iris-card {
-  min-height: 100%;
-  height: max-content;
-  justify-content: center;
-  border-radius: 0;
-  border: none;
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
-  padding-top: 48px;
-  padding-bottom: 48px;
-  box-sizing: border-box;
-}
-
 .iris-header-left,
 .iris-header-right {
   flex: 1;
