@@ -78,7 +78,6 @@ export class CardStore {
     questionShown?: string,
     userAnswer?: string,
     elapsedMs?: number,
-    softRetry = false,
   ): Promise<void> {
     // Read variant difficulty before updating frontmatter so the stability
     // calculation uses the reviewed variant's difficulty, not the file-level one.
@@ -93,13 +92,9 @@ export class CardStore {
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       const S = getStability(fm);
       const D = variantD ?? getDifficulty(fm);
-      let newS = updateStability(S, correct, D, elapsedMs);
-      if (softRetry && correct) {
-        // Half the stability growth on a teaching-mode retry
-        newS = S + (newS - S) * 0.5;
-      }
+      const newS = updateStability(S, correct, D, elapsedMs);
       fm["stability"] = newS;
-      fm["difficulty"] = updateDifficulty(getDifficulty(fm), correct, softRetry);
+      fm["difficulty"] = updateDifficulty(getDifficulty(fm), correct);
       delete fm["box"];
       fm["last-reviewed"] = new Date().toISOString();
       fm["repetitions"] = (fm["repetitions"] ?? 0) + 1;
@@ -115,7 +110,7 @@ export class CardStore {
         const updated: QAVariant = {
           ...v,
           lastReviewed: new Date().toISOString(),
-          difficulty: updateDifficulty(vD, correct, softRetry),
+          difficulty: updateDifficulty(vD, correct),
         };
 
         if (correct && userAnswer) {

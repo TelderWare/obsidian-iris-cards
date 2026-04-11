@@ -11,4 +11,3 @@ export type { OrderStepsResult } from "./order-steps";
 export { generateSolveEquation, encodeSolveEquation, decodeSolveEquation, roundToSigFigs, randomizeKnowns, checkNumericalAnswer, evaluateFormula } from "./solve-equation";
 export type { SolveEquationKnown, SolveEquationTarget, SolveEquationResult } from "./solve-equation";
 export { generateQA, generateVariant, markAnswer, appealAnswer } from "./qa";
-export { extractFactsFromNote, filterFacts } from "./facts";

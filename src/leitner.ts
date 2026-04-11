@@ -66,8 +66,8 @@ export function updateStability(stability: number, correct: boolean, difficulty 
 }
 
 /** Update difficulty after a review. */
-export function updateDifficulty(difficulty: number, correct: boolean, softRetry = false): number {
-  const delta = correct ? D_CORRECT_DELTA : (softRetry ? D_INCORRECT_DELTA * 0.5 : D_INCORRECT_DELTA);
+export function updateDifficulty(difficulty: number, correct: boolean): number {
+  const delta = correct ? D_CORRECT_DELTA : D_INCORRECT_DELTA;
   return clamp(difficulty + delta, D_MIN, D_MAX);
 }
 
@@ -141,7 +141,7 @@ export function getAllCards(app: App, cardsFolder: string, moduleFilter?: Set<st
   return sortByFilename(cards);
 }
 
-/** Sort cards by basename so sibling facts stay in extraction order. */
+/** Sort cards by basename for stable ordering. */
 export function sortByFilename(cards: TFile[]): TFile[] {
   return cards.sort((a, b) => a.basename.localeCompare(b.basename, undefined, { numeric: true }));
 }

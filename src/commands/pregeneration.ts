@@ -182,7 +182,7 @@ export class PregenManager {
     if (!gen) return [];
     let variants = await gen();
 
-    const QC_TYPES: Set<string> = new Set(["Q&A"]);
+    const QC_TYPES: Set<string> = new Set(["Q&A", "Correct the Mistake"]);
     if (QC_TYPES.has(type)) {
       const stdResults = await Promise.allSettled(
         variants.map(v => standardizeQuestion(body, v.question, v.answer, apiKey)),

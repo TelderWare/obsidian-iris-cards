@@ -12,119 +12,26 @@ import { type ReviewView, normalizeAnswer } from "./review-view";
 
 // ─── Answer Handler ─────────────────────────────────────────────────────
 
-/** Callback renderers invoke when the user answers. Encapsulates timer, feedback, rating, and teaching mode. */
-type AnswerFn = (correct: boolean, userAnswer?: string) => Promise<void>;
-
-/** Extract the heading section from the content note that a card's fact was derived from. */
-async function extractHeadingSection(view: ReviewView, cardFile: TFile): Promise<string | null> {
-  const fm = view.app.metadataCache.getFileCache(cardFile)?.frontmatter;
-
-  const noteLink = fm?.["content-note"] ?? fm?.["parent-note"];
-  if (typeof noteLink !== "string") return null;
-
-  const linkMatch = noteLink.match(/^\[\[(.+?)(\|.+?)?\]\]$/);
-  if (!linkMatch) return null;
-
-  const contentFile = view.app.metadataCache.getFirstLinkpathDest(linkMatch[1], cardFile.path);
-  if (!contentFile) return null;
-
-  const sourceContent = await view.app.vault.cachedRead(contentFile);
-  const sourceLines = sourceContent.split("\n");
-
-  const cardContent = await view.app.vault.cachedRead(cardFile);
-  const ctxMatch = cardContent.match(/^\(Context:\s*(.+?)\)\s*$/m);
-  const breadcrumbParts = ctxMatch ? ctxMatch[1].split(",").map(s => s.trim()) : [];
-  const headingNames = breadcrumbParts.slice(1);
-
-  if (headingNames.length === 0) {
-    const stripped = sourceContent.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
-    return stripped || null;
-  }
-
-  const deepest = headingNames[headingNames.length - 1];
-  const headingRegex = /^(#{1,6})\s+(.+)$/;
-  let startLine = -1;
-  let startLevel = 0;
-
-  for (let i = 0; i < sourceLines.length; i++) {
-    const m = sourceLines[i].match(headingRegex);
-    if (m && m[2].trim() === deepest) {
-      startLine = i;
-      startLevel = m[1].length;
-      break;
-    }
-  }
-
-  if (startLine === -1) return null;
-
-  let endLine = sourceLines.length;
-  for (let i = startLine + 1; i < sourceLines.length; i++) {
-    const m = sourceLines[i].match(headingRegex);
-    if (m && m[1].length <= startLevel) {
-      endLine = i;
-      break;
-    }
-  }
-
-  const section = sourceLines.slice(startLine, endLine).join("\n").trim();
-  return section || null;
-}
-
-/** Pick a different variant for the same card (for teaching mode retry). */
-async function pickRetryVariant(view: ReviewView, cardFile: TFile, currentVariant: QAVariant): Promise<QAVariant> {
-  const cached = view.plugin.qaCache.get(cardFile.path);
-  if (!cached) return currentVariant;
-
-  let variants: QAVariant[];
-  try {
-    variants = await cached;
-  } catch {
-    return currentVariant;
-  }
-
-  const active = variants.filter(v => !v.suspended && v.question !== currentVariant.question);
-  if (active.length === 0) return currentVariant;
-  return active[Math.floor(Math.random() * active.length)];
-}
+/** Callback renderers invoke when the user answers. Encapsulates timer, feedback, and rating. */
+type AnswerFn = (correct: boolean, userAnswer?: string, silent?: boolean) => Promise<void>;
 
 /**
- * Create the answer handler for a card. Captures the timer, feedback, rating,
- * and teaching-mode logic so individual renderers only need to call answer(correct).
+ * Create the answer handler for a card. Captures the timer, feedback, and rating
+ * so individual renderers only need to call answer(correct).
  */
 function createAnswerHandler(
   view: ReviewView,
   card: HTMLElement,
   cardFile: TFile,
   variant: QAVariant,
-  softRetry: boolean,
 ): AnswerFn {
   const t0 = performance.now();
-  return async (correct: boolean, userAnswer?: string) => {
+  return async (correct: boolean, userAnswer?: string, silent?: boolean) => {
     const elapsedMs = Math.round(performance.now() - t0);
     const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-    view.playFeedback(correct, record);
+    if (!silent) view.playFeedback(correct, record);
 
-    if (correct) {
-      await view.rateCard(cardFile, true, userAnswer, variant.question, elapsedMs, softRetry);
-      return;
-    }
-
-    // Wrong answer — check teaching mode
-    if (view.teachingMode && view.isQuiz && !softRetry) {
-      const extract = await extractHeadingSection(view, cardFile);
-      if (extract) {
-        const retryVariant = await pickRetryVariant(view, cardFile, variant);
-        card.style.minHeight = `${card.offsetHeight}px`;
-        card.addClass("iris-card-answered");
-        card.querySelectorAll(".iris-skip-card-btn, .iris-dontknow-btn, .iris-actions, .iris-show-btn").forEach(el => el.remove());
-        card.querySelectorAll<HTMLInputElement>(".iris-answer-input").forEach(el => { el.disabled = true; });
-        view.teachingState = { phase: "retry", cardFile, extract, retryVariant };
-        view.showTeachingModal(view.teachingState);
-        return;
-      }
-    }
-
-    await view.rateCard(cardFile, false, userAnswer, variant.question, elapsedMs, softRetry);
+    await view.rateCard(cardFile, correct, userAnswer, variant.question, elapsedMs);
   };
 }
 
@@ -218,13 +125,13 @@ export async function renderVariantInto(
 }
 
 export async function renderCurrentCard(
-  view: ReviewView, body: HTMLDivElement, cardFile: TFile, variant: QAVariant, softRetry = false,
+  view: ReviewView, body: HTMLDivElement, cardFile: TFile, variant: QAVariant,
 ): Promise<void> {
   body.querySelectorAll(".iris-card-preview").forEach((el) => el.remove());
   const card = body.createDiv({ cls: "iris-card" });
   view.currentCardEl = card;
 
-  const answer = createAnswerHandler(view, card, cardFile, variant, softRetry);
+  const answer = createAnswerHandler(view, card, cardFile, variant);
   await renderVariantInto(view, card, cardFile, variant, answer);
 
   // Suspend button — permanently disables this question variant
@@ -262,9 +169,7 @@ export async function renderCurrentCard(
     attr: { "aria-label": "Don\u2019t know" },
   });
   setIcon(dontKnowBtn, "circle-slash");
-  dontKnowBtn.addEventListener("click", () => {
-    view.rateCard(cardFile, false, undefined, variant.question, undefined, softRetry);
-  });
+  dontKnowBtn.addEventListener("click", () => { answer(false, undefined, true); });
 
   // Skip button — moves card to end without affecting box
   const skipBtn = card.createEl("button", {

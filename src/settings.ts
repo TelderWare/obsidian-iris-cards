@@ -21,7 +21,6 @@ export interface IrisCardsSettings {
   flashFeedback: boolean;
   badgePosition: BadgePosition;
   desiredRetention: number;
-  linkedNoteField: string;
   // Internal
   hotkeysConfigured: boolean;
 }
@@ -41,7 +40,6 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   flashFeedback: true,
   badgePosition: "bottom-left",
   desiredRetention: 0.9,
-  linkedNoteField: "video",
   hotkeysConfigured: false,
 };
 
@@ -121,6 +119,5 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         .addOption("claude-haiku-4-5-20251001", "Claude Haiku 4.5")
         .setValue(s.claudeModel).onChange(async (v) => { s.claudeModel = v; await save(); }));
 
-    addText("Linked note field", "Frontmatter key whose value points to a linked note for quiz generation (e.g. video, transcript).", "linkedNoteField", "video");
   }
 }

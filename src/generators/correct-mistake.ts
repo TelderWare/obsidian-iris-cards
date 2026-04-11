@@ -1,7 +1,11 @@
 import { callClaudeTool, TITLE_HINT } from "../api/client";
 
 const CORRECT_MISTAKE_PROMPT =
-  "You are an exercise generator. Given a fact, restate it with exactly one plausible error introduced. The error should distort a specific relationship, value, direction, or term — not just swap a name randomly. Provide the incorrect statement and the corrected statement separately." + TITLE_HINT;
+  "You are an exercise generator. Given a fact, restate it with exactly one plausible error introduced. " +
+  "The error MUST change a specific relationship, value, direction, or term so that the statement becomes factually wrong. " +
+  "Do NOT return the original fact unchanged — the incorrect statement must differ from the corrected one. " +
+  "The error should be plausible enough that a student who hasn't studied might miss it. " +
+  "Provide the incorrect statement and the corrected statement separately." + TITLE_HINT;
 
 const CORRECT_MISTAKE_TOOL = {
   name: "correct_mistake",
@@ -29,5 +33,10 @@ export async function generateCorrectMistake(
   const r = await callClaudeTool<{ incorrect: string; corrected: string }>(
     apiKey, model, CORRECT_MISTAKE_PROMPT, content, CORRECT_MISTAKE_TOOL, 400,
   );
-  return { incorrect: r.incorrect ?? "", corrected: r.corrected ?? "" };
+  const incorrect = r.incorrect ?? "";
+  const corrected = r.corrected ?? "";
+  if (incorrect.toLowerCase().trim() === corrected.toLowerCase().trim()) {
+    throw new Error("Correct the Mistake: generated statement has no actual error");
+  }
+  return { incorrect, corrected };
 }

@@ -1,4 +1,4 @@
-import { ItemView, TFile, WorkspaceLeaf, setIcon, MarkdownRenderer, Modal } from "obsidian";
+import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type IrisCardsPlugin from "../main";
 import { getDueCards, getAllCards, getModules } from "../leitner";
 import { type QAVariant } from "../types/exercises";
@@ -22,14 +22,6 @@ export class ReviewView extends ItemView {
   private doneCheckInterval: number | null = null;
   infiniteMode = false;
   moduleFilter = new Set<string>();
-  isQuiz = false;
-  teachingMode = false;
-  teachingState: {
-    phase: "teaching" | "retry";
-    cardFile: TFile;
-    extract: string;
-    retryVariant: QAVariant;
-  } | null = null;
   shownVariants = new Set<string>();
   scrollBody: HTMLDivElement | null = null;
   layoutReady = false;
@@ -53,11 +45,11 @@ export class ReviewView extends ItemView {
   }
 
   getDisplayText(): string {
-    return this.isQuiz ? "Quiz" : "Cards";
+    return "Cards";
   }
 
   getIcon(): string {
-    return this.isQuiz ? "graduation-cap" : "brain";
+    return "brain";
   }
 
   async onOpen(): Promise<void> {
@@ -94,19 +86,9 @@ export class ReviewView extends ItemView {
   }
 
   async loadDueCards(): Promise<void> {
-    if (this.plugin.pendingQuizCards && this.plugin.pendingQuizCards.length > 0) {
-      this.dueCards = this.plugin.pendingQuizCards;
-      this.plugin.pendingQuizCards = null;
-      this.isQuiz = true;
-      this.teachingMode = true;
-      (this.leaf as any).updateHeader?.();
-    } else {
-      this.isQuiz = false;
-      (this.leaf as any).updateHeader?.();
-      this.dueCards = this.infiniteMode
-        ? await getAllCards(this.app, this.plugin.settings.cardsFolder, this.moduleFilter.size > 0 ? this.moduleFilter : undefined)
-        : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
-    }
+    this.dueCards = this.infiniteMode
+      ? await getAllCards(this.app, this.plugin.settings.cardsFolder, this.moduleFilter.size > 0 ? this.moduleFilter : undefined)
+      : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
     if (this.dueCards.length === 0) {
       this.renderDoneCard();
       return;
@@ -165,18 +147,12 @@ export class ReviewView extends ItemView {
       await this.loadDueCards();
     });
 
-    if (this.isQuiz) {
-      makeToggle("book-open", "Teaching mode", this.teachingMode, (v) => {
-        this.teachingMode = v;
-      });
-    }
-
     // Module filter — icon button with dropdown checklist
     const modules = getModules(this.app, this.plugin.settings.cardsFolder);
     if (modules.length > 0) {
       const filterWrap = headerLeft.createDiv({ cls: "iris-filter-wrap" });
       const filterBtn = filterWrap.createEl("button", { cls: "iris-toggle", attr: { "aria-label": "Filter by module" } });
-      setIcon(filterBtn, this.isQuiz ? "graduation-cap" : "list-filter");
+      setIcon(filterBtn, "list-filter");
       const dropdown = filterWrap.createDiv({ cls: "iris-filter-dropdown iris-hidden" });
 
       const updateBtn = () => {
@@ -285,26 +261,8 @@ export class ReviewView extends ItemView {
     }, 10_000);
   }
 
-  showTeachingModal(ts: NonNullable<ReviewView["teachingState"]>): void {
-    const modal = new TeachingModal(this, ts);
-    modal.open();
-  }
-
   async showNextCard(): Promise<void> {
     this.clearDoneCheck();
-
-    // Teaching mode intercepts: render teaching or retry card instead of next queue card
-    if (this.teachingState && this.teachingState.phase === "retry") {
-      const ts = this.teachingState;
-      this.ensureLayout();
-      const body = this.scrollBody!;
-      body.querySelectorAll(".iris-card-preview, .iris-done-card").forEach((el) => el.remove());
-      this.currentCard = ts.cardFile;
-      this.currentVariant = ts.retryVariant;
-      this.teachingState = null;
-      await renderCurrentCard(this, body, ts.cardFile, ts.retryVariant, true);
-      return;
-    }
 
     // Skip deleted cards
     while (this.dueCards.length > 0 && !this.app.vault.getAbstractFileByPath(this.dueCards[0].path)) {
@@ -451,7 +409,7 @@ export class ReviewView extends ItemView {
     }
   }
 
-  async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number, softRetry = false): Promise<void> {
+  async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number): Promise<void> {
     // Freeze the current card as answered — disable interactions, keep answer visible
     if (this.currentCardEl) {
       this.currentCardEl.style.minHeight = `${this.currentCardEl.offsetHeight}px`;
@@ -465,7 +423,7 @@ export class ReviewView extends ItemView {
 
     this.plugin.qaCache.delete(file.path);
     if (questionShown) this.renderStateCache.delete(file.path + "\0" + questionShown);
-    await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs, softRetry);
+    await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs);
 
     if (this.infiniteMode) {
       const card = this.dueCards.shift();
@@ -484,32 +442,3 @@ export class ReviewView extends ItemView {
   }
 }
 
-class TeachingModal extends Modal {
-  private view: ReviewView;
-  private ts: NonNullable<ReviewView["teachingState"]>;
-
-  constructor(view: ReviewView, ts: NonNullable<ReviewView["teachingState"]>) {
-    super(view.app);
-    this.view = view;
-    this.ts = ts;
-  }
-
-  async onOpen(): Promise<void> {
-    const { contentEl } = this;
-    contentEl.addClass("iris-teaching-modal");
-
-    const content = contentEl.createDiv({ cls: "iris-teaching-content" });
-    await MarkdownRenderer.render(this.app, this.ts!.extract, content, this.ts!.cardFile.path, this.view);
-
-    const continueBtn = contentEl.createEl("button", {
-      cls: "iris-retry-btn",
-      text: "Try again",
-    });
-    continueBtn.addEventListener("click", () => { this.close(); });
-  }
-
-  onClose(): void {
-    this.contentEl.empty();
-    this.view.showNextCard();
-  }
-}

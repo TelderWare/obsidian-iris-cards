@@ -13,15 +13,12 @@ import { setRelayApp } from "./api/client";
 import { encryptSecret, decryptSecret } from "./commands/utils";
 import { PregenManager } from "./commands/pregeneration";
 import { createNoteFromSelection, memorizeSelection } from "./commands/note-creation";
-import { generateQuiz, generateQuizFromLinkedNote } from "./commands/quiz-generation";
 
 const HOTKEYS_PATH = ".obsidian/hotkeys.json";
 
 export default class IrisCardsPlugin extends Plugin {
   settings: IrisCardsSettings = DEFAULT_SETTINGS;
   qaCache: Map<string, Promise<QAVariant[]>> = new Map();
-  /** When set, the next review view load will use these cards instead of querying due cards. */
-  pendingQuizCards: TFile[] | null = null;
   cardStore!: CardStore;
   pregen!: PregenManager;
   private ribbonIconEl: HTMLElement | null = null;
@@ -55,18 +52,6 @@ export default class IrisCardsPlugin extends Plugin {
       id: "open-review",
       name: "Review due cards",
       callback: () => this.activateReviewView(),
-    });
-
-    this.addCommand({
-      id: "generate-quiz",
-      name: "Quiz",
-      callback: () => generateQuiz(this),
-    });
-
-    this.addCommand({
-      id: "generate-quiz-linked",
-      name: "Quiz from linked note",
-      callback: () => generateQuizFromLinkedNote(this),
     });
 
     this.ribbonIconEl = this.addRibbonIcon("brain", "Iris Cards", () => {
