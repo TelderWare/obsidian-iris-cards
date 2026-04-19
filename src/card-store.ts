@@ -1,6 +1,6 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import { type QAVariant, type ExerciseType } from "./types/exercises";
-import { parseQABlock, stripQABlock, buildQABlock } from "./types/qa-block";
+import { parseQABlock, stripQABlock, buildQABlock, dedupeVariants } from "./types/qa-block";
 import { getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog } from "./leitner";
 
 function normalizeAnswer(s: string): string {
@@ -10,17 +10,26 @@ function normalizeAnswer(s: string): string {
 export class CardStore {
   constructor(private app: App) {}
 
-  /** Read, mutate, and write back a card's QA variants in one step. */
+  /**
+   * Read, mutate, and write back a card's QA variants in one step. Dedupes
+   * variants with matching (exerciseType, question) both before and after the
+   * updater runs so `findIndex(v => v.question === ...)` lookups in the
+   * updater are unambiguous, and any duplicates introduced by appends
+   * (e.g., pregen generating a Q&A whose main + alternate collapse to the
+   * same canonical form after QC) get merged back down.
+   */
   async updateVariants(
     file: TFile,
     updater: (variants: QAVariant[], eligible: ExerciseType[]) => void,
   ): Promise<QAVariant[]> {
     const content = await this.app.vault.read(file);
     const parsed = parseQABlock(content);
-    updater(parsed.variants, parsed.eligibleTypes);
+    const variants = dedupeVariants(parsed.variants);
+    updater(variants, parsed.eligibleTypes);
+    const final = dedupeVariants(variants);
     const stripped = stripQABlock(content);
-    await this.app.vault.modify(file, stripped.trimEnd() + buildQABlock(parsed.variants, parsed.eligibleTypes));
-    return parsed.variants;
+    await this.app.vault.modify(file, stripped.trimEnd() + buildQABlock(final, parsed.eligibleTypes));
+    return final;
   }
 
   /** Sync the all-suspended frontmatter flag with current variant state. */

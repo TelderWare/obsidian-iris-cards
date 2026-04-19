@@ -21,6 +21,7 @@ export default class IrisCardsPlugin extends Plugin {
   qaCache: Map<string, Promise<QAVariant[]>> = new Map();
   cardStore!: CardStore;
   pregen!: PregenManager;
+  reviewViews: Set<ReviewView> = new Set();
   private ribbonIconEl: HTMLElement | null = null;
   private badgeEl: HTMLElement | null = null;
 

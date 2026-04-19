@@ -26,6 +26,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
   let difficulty: number | null = null;
 
   const exerciseSet = new Set<string>(EXERCISE_TYPES);
+  const LEGACY_ALIASES: Record<string, ExerciseType> = { "Order Steps": "Place in Order" };
 
   const pushVariant = () => {
     if (q && a) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, lastReviewed: reviewed, suspended, recordMs, difficulty });
@@ -48,7 +49,8 @@ export function parseQABlock(fullContent: string): ParsedQA {
       a = line.slice(3).trim();
     } else if (line.startsWith("Type: ")) {
       const val = line.slice(6).trim();
-      if (exerciseSet.has(val)) type = val as ExerciseType;
+      const mapped = LEGACY_ALIASES[val] ?? val;
+      if (exerciseSet.has(mapped)) type = mapped as ExerciseType;
     } else if (line.startsWith("Also accepted: ")) {
       accepted = line.slice(15).split(" | ").map(s => s.trim()).filter(Boolean);
     } else if (line.startsWith("Reviewed: ")) {
@@ -69,6 +71,49 @@ export function parseQABlock(fullContent: string): ParsedQA {
   pushVariant();
 
   return { body, eligibleTypes, variants };
+}
+
+/**
+ * Merge variants with the same (exerciseType, question) into one.
+ * Chosen when the QC pass collapses a Q&A main + alternate to identical strings,
+ * or when two generations happen to yield the same canonical form. Preserves
+ * the more-reviewed variant's state and unions acceptedAnswers so no user data
+ * is lost.
+ */
+export function dedupeVariants(variants: QAVariant[]): QAVariant[] {
+  const seen = new Map<string, QAVariant>();
+  const order: string[] = [];
+  for (const v of variants) {
+    const key = `${v.exerciseType}|${v.question}`;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, v);
+      order.push(key);
+    } else {
+      seen.set(key, mergeVariants(existing, v));
+    }
+  }
+  return order.map(k => seen.get(k)!);
+}
+
+function mergeVariants(a: QAVariant, b: QAVariant): QAVariant {
+  // Primary = more recently reviewed; null < any date
+  const primary = (a.lastReviewed ?? "") >= (b.lastReviewed ?? "") ? a : b;
+  const secondary = primary === a ? b : a;
+  const acceptedAnswers = Array.from(new Set([...primary.acceptedAnswers, ...secondary.acceptedAnswers]));
+  const recordMs = primary.recordMs != null && secondary.recordMs != null
+    ? Math.min(primary.recordMs, secondary.recordMs)
+    : primary.recordMs ?? secondary.recordMs;
+  return {
+    exerciseType: primary.exerciseType,
+    question: primary.question,
+    answer: primary.answer,
+    acceptedAnswers,
+    lastReviewed: primary.lastReviewed,
+    suspended: primary.suspended || secondary.suspended,
+    recordMs,
+    difficulty: primary.difficulty ?? secondary.difficulty,
+  };
 }
 
 export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[] = []): string {

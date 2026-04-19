@@ -2,7 +2,7 @@ import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type IrisCardsPlugin from "../main";
 import { getDueCards, getAllCards, getModules } from "../leitner";
 import { type QAVariant } from "../types/exercises";
-import { renderCurrentCard } from "./renderers";
+import { renderCurrentCard, renderUpcomingPreviews } from "./renderers";
 import { hasRelay } from "../api/client";
 
 export const VIEW_TYPE_REVIEW = "iris-cards-review";
@@ -30,6 +30,7 @@ export class ReviewView extends ItemView {
   private audioCtx: AudioContext | null = null;
   currentCardEl: HTMLElement | null = null;
   currentVariant: QAVariant | null = null;
+  peekedAnswer = false;
   scrollAnimId = 0;
   previewGenId = 0;
   renderStateCache = new Map<string, Record<string, unknown>>();
@@ -54,10 +55,12 @@ export class ReviewView extends ItemView {
   async onOpen(): Promise<void> {
     this.sndCorrect = new Audio(SND_CORRECT);
     this.sndIncorrect = new Audio(SND_INCORRECT);
+    this.plugin.reviewViews.add(this);
     await this.loadDueCards();
   }
 
   async onClose(): Promise<void> {
+    this.plugin.reviewViews.delete(this);
     this.clearDoneCheck();
     this.sndCorrect = null;
     this.sndIncorrect = null;
@@ -251,6 +254,7 @@ export class ReviewView extends ItemView {
 
   async showNextCard(): Promise<void> {
     this.clearDoneCheck();
+    this.peekedAnswer = false;
 
     // Skip deleted cards
     while (this.dueCards.length > 0 && !this.app.vault.getAbstractFileByPath(this.dueCards[0].path)) {
@@ -405,13 +409,20 @@ export class ReviewView extends ItemView {
       // Reveal answer in manual mode
       this.currentCardEl.querySelectorAll(".iris-answer").forEach(el => el.removeClass("iris-hidden"));
       // Remove elements that no longer apply; keep suspend + appeal for scroll-back
-      this.currentCardEl.querySelectorAll(".iris-skip-card-btn, .iris-dontknow-btn, .iris-actions, .iris-show-btn").forEach(el => el.remove());
+      this.currentCardEl.querySelectorAll(".iris-skip-card-btn, .iris-actions, .iris-show-btn").forEach(el => el.remove());
       this.currentCardEl.querySelectorAll<HTMLInputElement>(".iris-answer-input").forEach(el => { el.disabled = true; });
     }
 
     this.plugin.qaCache.delete(file.path);
     if (questionShown) this.renderStateCache.delete(file.path + "\0" + questionShown);
-    await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs);
+
+    // If the user peeked at the parent note, skip recording — it's not a genuine review
+    if (!this.peekedAnswer) {
+      await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs);
+      for (const other of this.plugin.reviewViews) {
+        if (other !== this) other.handleExternalRate(file);
+      }
+    }
 
     if (this.infiniteMode) {
       const card = this.dueCards.shift();
@@ -427,6 +438,25 @@ export class ReviewView extends ItemView {
     }
     this.plugin.updateBadge();
     await this.showNextCard();
+  }
+
+  /** Another ReviewView just recorded a review for this file — drop it from our queue. */
+  async handleExternalRate(file: TFile): Promise<void> {
+    this.plugin.qaCache.delete(file.path);
+    const idx = this.dueCards.findIndex(c => c.path === file.path);
+    if (idx === -1) return;
+    if (idx === 0 && this.currentCard?.path === file.path) {
+      this.dueCards.shift();
+      this.plugin.updateBadge();
+      await this.showNextCard();
+    } else {
+      this.dueCards.splice(idx, 1);
+      this.plugin.updateBadge();
+      if (this.scrollBody) {
+        this.scrollBody.querySelectorAll(".iris-card-preview").forEach(el => el.remove());
+        await renderUpcomingPreviews(this, this.scrollBody);
+      }
+    }
   }
 }
 

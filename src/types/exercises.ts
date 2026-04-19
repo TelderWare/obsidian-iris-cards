@@ -5,7 +5,7 @@ export const EXERCISE_TYPES = [
   "True/False",
   "Solve Equation",
   "Assemble Equation",
-  "Order Steps",
+  "Place in Order",
   "Correct the Mistake",
 ] as const;
 
@@ -18,7 +18,7 @@ export const TYPE_PRIORITY: ExerciseType[] = [
   "Cloze",
   "True/False",
   "Correct the Mistake",
-  "Order Steps",
+  "Place in Order",
   "Assemble Equation",
   "Solve Equation",
 ];

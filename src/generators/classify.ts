@@ -22,7 +22,7 @@ A statement the learner judges as true or false.
 A problem requiring the learner to use a quantitative or mathematical relationship to compute an answer.
 - Eligible when: the fact contains an equation, formula, or quantitative relationship with variables that can be assigned concrete values.
 - Ineligible when: the fact is purely qualitative, or the equation is trivial.
-### Order Steps
+### Place in Order
 Arrange steps of a process in the correct sequence.
 - Eligible when: the fact describes or implies a sequential process with 3 or more discrete, reorderable steps.
 - Ineligible when: the fact mentions a process but only 1-2 steps, or the order is trivially obvious.

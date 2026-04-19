@@ -26,3 +26,51 @@ export async function generateTrueFalse(
   );
   return { statement: r.statement ?? "", answer: r.answer === "False" ? "False" : "True" };
 }
+
+const INVERSE_PROMPT =
+  "You are given a true/false statement and its answer. Produce a new statement that reads almost identically but swaps exactly one technical term (a molecule, enzyme, structure, process, direction, ion, cofactor, etc.) so the truth value flips: if the original was true the new one must be false, and vice-versa. The rest of the sentence must stay the same so both statements scan alike at a glance.";
+
+const INVERSE_TOOL = {
+  name: "true_false_inverse",
+  description: "Return the inverted statement.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      statement: { type: "string" as const, description: "The new statement with one technical term swapped" },
+      answer: { type: "string" as const, enum: ["True", "False"], description: "Whether the new statement is true or false" },
+    },
+    required: ["statement", "answer"],
+  },
+};
+
+export async function generateTrueFalseInverse(
+  original: string,
+  originalAnswer: string,
+  apiKey: string,
+  model: string,
+): Promise<{ statement: string; answer: string }> {
+  const content = `Statement: ${original}\nAnswer: ${originalAnswer}`;
+  const r = await callClaudeTool<{ statement: string; answer: string }>(
+    apiKey, model, INVERSE_PROMPT, content, INVERSE_TOOL, 300,
+  );
+  const answer = r.answer === "False" ? "False" : "True";
+  // Validate the inverse actually flipped the truth value
+  if (answer === originalAnswer) throw new Error("Inverse did not flip truth value");
+  return { statement: r.statement ?? "", answer };
+}
+
+// ─── Paired encoding ───────────────────────────────────────────────────
+
+export function encodeTFPair(trueStatement: string, falseStatement: string): { question: string; answer: string } {
+  return {
+    question: `TRUE: ${trueStatement}\nFALSE: ${falseStatement}`,
+    answer: "Paired",
+  };
+}
+
+export function decodeTFPair(question: string, answer: string): { trueStatement: string; falseStatement: string } | null {
+  if (answer !== "Paired") return null;
+  const idx = question.indexOf("\nFALSE: ");
+  if (idx === -1 || !question.startsWith("TRUE: ")) return null;
+  return { trueStatement: question.slice(6, idx), falseStatement: question.slice(idx + 8) };
+}

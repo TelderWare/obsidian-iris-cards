@@ -308,6 +308,7 @@ input.iris-answer-input:focus {
   margin-top: 24px;
   font-weight: 600;
   font-size: 1.1em;
+  min-height: 1.1em;
 }
 
 .iris-marking-correct {
@@ -419,7 +420,6 @@ button.iris-card-icon {
 .iris-goback-btn { top: 10px; left: 14px; }
 .iris-suspend-btn { top: 10px; left: 14px; }
 .iris-parent-btn { top: 10px; right: 14px; }
-.iris-dontknow-btn { bottom: 10px; left: 14px; }
 .iris-skip-card-btn { bottom: 10px; right: 14px; }
 .iris-appeal-icon { bottom: 10px; left: 14px; }
 

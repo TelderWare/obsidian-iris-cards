@@ -2,7 +2,7 @@ export { classifyEligibility } from "./classify";
 export { generateMultipleChoice, encodeMC, decodeMC } from "./multiple-choice";
 export type { MCResult } from "./multiple-choice";
 export { generateCloze, parseClozeTerms, occludeCloze } from "./cloze";
-export { generateTrueFalse } from "./true-false";
+export { generateTrueFalse, generateTrueFalseInverse, encodeTFPair, decodeTFPair } from "./true-false";
 export { generateAssembleEquation, encodeAssembleEquation } from "./assemble-equation";
 export { generateCorrectMistake } from "./correct-mistake";
 export type { CorrectMistakeResult } from "./correct-mistake";

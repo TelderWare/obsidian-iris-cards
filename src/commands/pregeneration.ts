@@ -11,7 +11,7 @@ import {
   generateSolveEquation, encodeSolveEquation,
   generateOrderSteps, encodeOrderSteps,
   generateCorrectMistake,
-  generateTrueFalse,
+  generateTrueFalse, generateTrueFalseInverse, encodeTFPair,
   generateAssembleEquation, encodeAssembleEquation,
 } from "../generators";
 import { getDueCards } from "../leitner";
@@ -172,9 +172,18 @@ export class PregenManager {
       "Multiple Choice": async () => { const e = encodeMC(await generateMultipleChoice(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Cloze": async () => { const s = await generateCloze(body, apiKey, model); return [make(s, s)]; },
       "Solve Equation": async () => { const e = encodeSolveEquation(await generateSolveEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
-      "Order Steps": async () => { const e = encodeOrderSteps(await generateOrderSteps(body, apiKey, model)); return [make(e.question, e.answer)]; },
+      "Place in Order": async () => { const e = encodeOrderSteps(await generateOrderSteps(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Correct the Mistake": async () => { const r = await generateCorrectMistake(body, apiKey, model); return [make(r.incorrect, r.corrected)]; },
-      "True/False": async () => { const r = await generateTrueFalse(body, apiKey, model); return [make(r.statement, r.answer)]; },
+      "True/False": async () => {
+        const r = await generateTrueFalse(body, apiKey, model);
+        try {
+          const inv = await generateTrueFalseInverse(r.statement, r.answer, apiKey, model);
+          const t = r.answer === "True" ? r.statement : inv.statement;
+          const f = r.answer === "False" ? r.statement : inv.statement;
+          const e = encodeTFPair(t, f);
+          return [make(e.question, e.answer)];
+        } catch { return [make(r.statement, r.answer)]; }
+      },
       "Assemble Equation": async () => { const e = encodeAssembleEquation(await generateAssembleEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
     };
 

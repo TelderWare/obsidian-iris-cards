@@ -5,6 +5,7 @@ import { markAnswer, appealAnswer } from "../generators/qa";
 import { hasRelay } from "../api/client";
 import { parseClozeTerms, occludeCloze } from "../generators/cloze";
 import { decodeMC } from "../generators/multiple-choice";
+import { decodeTFPair } from "../generators/true-false";
 import { decodeSolveEquation, randomizeKnowns, evaluateFormula, roundToSigFigs, checkNumericalAnswer } from "../generators/solve-equation";
 import { decodeOrderSteps, shuffleArray } from "../generators/order-steps";
 import { updateStability, getStability, getDifficulty, updateDifficulty } from "../leitner";
@@ -13,7 +14,7 @@ import { type ReviewView, normalizeAnswer } from "./review-view";
 // ─── Answer Handler ─────────────────────────────────────────────────────
 
 /** Callback renderers invoke when the user answers. Encapsulates timer, feedback, and rating. */
-type AnswerFn = (correct: boolean, userAnswer?: string, silent?: boolean) => Promise<void>;
+type AnswerFn = (correct: boolean, userAnswer?: string) => Promise<void>;
 
 /**
  * Create the answer handler for a card. Captures the timer, feedback, and rating
@@ -26,10 +27,10 @@ function createAnswerHandler(
   variant: QAVariant,
 ): AnswerFn {
   const t0 = performance.now();
-  return async (correct: boolean, userAnswer?: string, silent?: boolean) => {
+  return async (correct: boolean, userAnswer?: string) => {
     const elapsedMs = Math.round(performance.now() - t0);
     const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-    if (!silent) view.playFeedback(correct, record);
+    view.playFeedback(correct, record);
 
     await view.rateCard(cardFile, correct, userAnswer, variant.question, elapsedMs);
   };
@@ -87,13 +88,25 @@ export async function renderVariantInto(
       });
     },
     "True/False": async () => {
+      const pair = decodeTFPair(variant.question, variant.answer);
+      let statement: string;
+      let correct: string;
+      if (pair) {
+        const rs = view.getRenderState(cardFile, variant);
+        const showTrue = (rs.tfShowTrue as boolean) ?? (rs.tfShowTrue = Math.random() < 0.5);
+        statement = showTrue ? pair.trueStatement : pair.falseStatement;
+        correct = showTrue ? "True" : "False";
+      } else {
+        statement = variant.question;
+        correct = variant.answer;
+      }
       await renderChoiceCard(view, card, variant, answer, {
-        questionMd: `**True or false?**\n\n${variant.question}`,
+        questionMd: `**True or false?**\n\n${statement}`,
         options: [
           { label: "True", value: "True", cls: "iris-tf-true" },
           { label: "False", value: "False", cls: "iris-tf-false" },
         ],
-        correct: variant.answer,
+        correct,
         optionsCls: "iris-tf-options",
       });
     },
@@ -101,11 +114,11 @@ export async function renderVariantInto(
       source: variant.question,
     }),
     "Solve Equation": () => renderSolveEquation(view, card, cardFile, variant, answer),
-    "Order Steps": () => renderOrderSteps(view, card, cardFile, variant, answer),
+    "Place in Order": () => renderOrderSteps(view, card, cardFile, variant, answer),
     "Correct the Mistake": async () => {
       await renderInputCard(view, card, cardFile, variant, answer, {
         questionMd: `**Find and correct the mistake:**\n\n${variant.question}`,
-        answerMd: variant.answer,
+        canonicalAnswer: variant.answer,
         autoSubmitOnMatch: true,
         llmMarker: {
           question: `The following statement contains a mistake: "${variant.question}"\nWhat is the corrected version?`,
@@ -158,18 +171,11 @@ export async function renderCurrentCard(
       });
       setIcon(parentBtn, "help-circle");
       parentBtn.addEventListener("click", () => {
+        view.peekedAnswer = true;
         view.app.workspace.openLinkText(linkMatch[1], cardFile.path);
       });
     }
   }
-
-  // Don't know button — counts as wrong without attempting
-  const dontKnowBtn = card.createEl("button", {
-    cls: "iris-card-icon iris-dontknow-btn",
-    attr: { "aria-label": "Don\u2019t know" },
-  });
-  setIcon(dontKnowBtn, "circle-slash");
-  dontKnowBtn.addEventListener("click", () => { answer(false, undefined, true); });
 
   // Skip button — moves card to end without affecting box
   const skipBtn = card.createEl("button", {
@@ -191,8 +197,9 @@ export async function renderCurrentCard(
 // ─── Shared Input Card Helper ───────────────────────────────────────────
 
 /**
- * Renders a card with: question -> text input -> hidden answer -> marking.
- * Grading modes:
+ * Renders a card with: question -> text input -> marking.
+ * On submit, the input is replaced in-place with the canonical answer so the
+ * card never grows vertically. Grading modes:
  *   - checkAnswer: local check (Cloze, Solve Equation, Assemble Equation)
  *   - llmMarker: exact-match shortcut then LLM fallback (Q&A, Correct the Mistake)
  *   - Both: local check for auto-submit + LLM fallback for grading
@@ -203,7 +210,7 @@ async function renderInputCard(
   answer: AnswerFn,
   opts: {
     questionMd: string;
-    answerMd: string;
+    canonicalAnswer: string;
     checkAnswer?: (input: string) => boolean;
     autoSubmitOnMatch?: boolean;
     inputMode?: string;
@@ -218,21 +225,18 @@ async function renderInputCard(
   if (opts.inputMode) attrs.inputmode = opts.inputMode;
   const input = inputSection.createEl("input", { type: "text", cls: "iris-answer-input", attr: attrs });
 
-  const answerSection = card.createDiv({ cls: "iris-answer iris-hidden" });
-  await MarkdownRenderer.render(view.app, opts.answerMd, answerSection.createDiv(), "", view);
-
-  const markingEl = card.createDiv({ cls: "iris-marking iris-hidden" });
+  const markingEl = card.createDiv({ cls: "iris-marking" });
 
   input.focus();
 
   let answered = false;
 
   const showResult = (correct: boolean) => {
-    answerSection.removeClass("iris-hidden");
-    markingEl.removeClass("iris-hidden");
-    markingEl.setText(correct ? "Correct" : "Incorrect");
+    markingEl.removeClass("iris-loading");
+    markingEl.setText(correct ? (view.peekedAnswer ? "Correct (peeked)" : "Correct") : "Incorrect");
     markingEl.toggleClass("iris-marking-correct", correct);
     markingEl.toggleClass("iris-marking-incorrect", !correct);
+    input.value = opts.canonicalAnswer;
     input.disabled = true;
   };
 
@@ -272,26 +276,25 @@ async function renderInputCard(
       return;
     }
 
-    // LLM fallback marking
+    // LLM fallback marking — reuse markingEl so the card doesn't grow mid-mark
     input.disabled = true;
-    const marking = card.createEl("p", { text: "Marking\u2026", cls: "iris-loading" });
+    markingEl.setText("Marking\u2026");
+    markingEl.addClass("iris-loading");
     try {
       const apiKey = view.plugin.settings.anthropicApiKey;
       const correct = await markAnswer(
         opts.llmMarker.question, opts.llmMarker.answer, userAnswer,
         apiKey, view.plugin.settings.claudeModel,
       );
-      marking.remove();
       showResult(correct);
       if (!correct) addAppealButton(view, card, cardFile, variant, userAnswer, markingEl);
       await answer(correct, userAnswer);
     } catch (e) {
-      marking.remove();
       answered = false;
       input.disabled = false;
+      markingEl.removeClass("iris-loading");
       markingEl.setText(`Marking failed: ${e instanceof Error ? e.message : String(e)}`);
       markingEl.addClass("iris-marking-incorrect");
-      markingEl.removeClass("iris-hidden");
     }
   };
 
@@ -353,7 +356,11 @@ function addAppealButton(
           delete fm["box"];
         });
         await view.plugin.cardStore.addAcceptedAnswer(cardFile, variant.question, userAnswer);
-        markingEl.setText("Correct");
+        // Invalidate cached variants so the next render of this card sees the
+        // newly-accepted answer; otherwise pregenerateQA's pre-appeal snapshot
+        // sticks around and isExactMatch keeps missing, forcing re-appeal forever.
+        view.plugin.qaCache.delete(cardFile.path);
+        markingEl.setText(view.peekedAnswer ? "Correct (peeked)" : "Correct");
         markingEl.addClass("iris-marking-correct");
         appealBtn.remove();
         view.plugin.updateBadge();
@@ -384,7 +391,7 @@ async function renderQA(
   if (view.plugin.settings.autoMark) {
     await renderInputCard(view, card, cardFile, variant, answer, {
       questionMd: variant.question,
-      answerMd: variant.answer,
+      canonicalAnswer: variant.answer,
       autoSubmitOnMatch: true,
       llmMarker: {
         question: variant.question,
@@ -466,14 +473,13 @@ async function renderOcclude(
   const filled = opts.source.replace(/\*([^*]+)\*/g, (_, t) => ti++ === occludeIdx ? `**${t}**` : t);
 
   const fmtQ = opts.title ? `**${opts.title}**\n\n${display}` : display;
-  const fmtA = opts.title ? `**${opts.title}**\n\n${filled}` : filled;
 
   if (view.plugin.settings.autoMark) {
     const apiKey = view.plugin.settings.anthropicApiKey;
     const useLlm = apiKey || hasRelay();
     await renderInputCard(view, card, cardFile, variant, answer, {
       questionMd: fmtQ,
-      answerMd: fmtA,
+      canonicalAnswer: term,
       autoSubmitOnMatch: true,
       llmMarker: useLlm ? {
         question: opts.title ? `${opts.title}\n${display}` : display,
@@ -488,6 +494,7 @@ async function renderOcclude(
     return;
   }
 
+  const fmtA = opts.title ? `**${opts.title}**\n\n${filled}` : filled;
   await renderManualReveal(view, card, answer, fmtQ, fmtA);
 }
 
@@ -524,7 +531,7 @@ async function renderSolveEquation(
 
   await renderInputCard(view, card, cardFile, variant, answer, {
     questionMd: display,
-    answerMd: `${expected} ${se.target.units}`,
+    canonicalAnswer: `${expected} ${se.target.units}`,
     checkAnswer: (val) => {
       const num = parseFloat(val);
       return !isNaN(num) && checkNumericalAnswer(num, expected, se.target.sigfigs);
@@ -641,7 +648,7 @@ async function renderOrderSteps(
     await MarkdownRenderer.render(view.app, correctMd, answerSection.createDiv(), "", view);
 
     const markingEl = card.createDiv({ cls: "iris-marking" });
-    markingEl.setText(correct ? "Correct" : "Incorrect");
+    markingEl.setText(correct ? (view.peekedAnswer ? "Correct (peeked)" : "Correct") : "Incorrect");
     markingEl.addClass(correct ? "iris-marking-correct" : "iris-marking-incorrect");
 
     await answer(correct);
