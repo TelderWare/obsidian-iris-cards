@@ -3,7 +3,7 @@
   "name": "Iris Cards",
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
-  "description": "AI-powered spaced repetition with auto-generated exercises (Q&A, multiple choice, cloze, equations, and more) plus quick note creation from selections.",
+  "description": "Spaced repetition with auto-generated exercises (Q&A, multiple choice, cloze, equations, and more) plus quick note creation from selections.",
   "author": "mgodd",
   "isDesktopOnly": false
 }
