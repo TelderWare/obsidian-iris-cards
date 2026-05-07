@@ -2,7 +2,7 @@ import { TFile } from "obsidian";
 import { TYPE_PRIORITY, type QAVariant, type ExerciseType } from "../types/exercises";
 import { parseQABlock } from "../types/qa-block";
 import { setRelayPriority, hasRelay } from "../api/client";
-import { standardizeQuestion } from "../api/qc";
+import { standardizeQuestion, reframeQuestion } from "../api/qc";
 import {
   classifyEligibility,
   generateQA, generateVariant,
@@ -10,6 +10,7 @@ import {
   generateMultipleChoice, encodeMC,
   generateSolveEquation, encodeSolveEquation,
   generateOrderSteps, encodeOrderSteps,
+  generateList, encodeList,
   generateCorrectMistake,
   generateTrueFalse, generateTrueFalseInverse, encodeTFPair,
   generateAssembleEquation, encodeAssembleEquation,
@@ -21,7 +22,6 @@ interface PregenEntry {
   card: TFile;
   priority: number;
   resolve: (v: QAVariant[]) => void;
-  reject: (e: unknown) => void;
 }
 
 export class PregenManager {
@@ -45,11 +45,10 @@ export class PregenManager {
       return;
     }
     let resolve!: (v: QAVariant[]) => void;
-    let reject!: (e: unknown) => void;
-    const promise = new Promise<QAVariant[]>((res, rej) => { resolve = res; reject = rej; });
+    const promise = new Promise<QAVariant[]>((res) => { resolve = res; });
     this.plugin.qaCache.set(card.path, promise);
     this.pregenQueued.add(card.path);
-    const entry: PregenEntry = { card, priority, resolve, reject };
+    const entry: PregenEntry = { card, priority, resolve };
     const idx = this.pregenQueue.findIndex(e => e.priority < priority);
     if (idx === -1) {
       this.pregenQueue.push(entry);
@@ -84,17 +83,19 @@ export class PregenManager {
   private drainPregenQueue(apiKey: string): void {
     while (this.pregenRunning < this.PREGEN_CONCURRENCY && this.pregenQueue.length > 0) {
       const entry = this.pregenQueue.shift()!;
-      const { card, priority: localPriority, resolve, reject } = entry;
+      const { card, priority: localPriority, resolve } = entry;
       this.pregenQueued.delete(card.path);
       this.pregenRunning++;
       void (async () => {
+        let existingVariants: QAVariant[] = [];
         try {
           setRelayPriority(PregenManager.toRelayPriority(localPriority));
           const content = await this.plugin.app.vault.read(card);
           const parsed = parseQABlock(content);
+          existingVariants = [...parsed.variants];
 
           let eligible = parsed.eligibleTypes;
-          let variants = [...parsed.variants];
+          let variants = [...existingVariants];
 
           if (eligible.length === 0) {
             eligible = await classifyEligibility(parsed.body, apiKey, this.plugin.settings.claudeModel);
@@ -132,7 +133,9 @@ export class PregenManager {
           resolve(variants);
         } catch (e) {
           this.plugin.qaCache.delete(card.path);
-          reject(e);
+          // Fall back to existing variants on the card if generation failed.
+          // If none exist, resolve empty so the reviewer skips this card.
+          resolve(existingVariants);
         } finally {
           setRelayPriority(undefined);
           this.pregenRunning--;
@@ -150,9 +153,10 @@ export class PregenManager {
     const model = this.plugin.settings.claudeModel;
     const make = (q: string, a: string): QAVariant => ({
       exerciseType: type,
-      question: q,
-      answer: a,
+      question: q.trim(),
+      answer: a.trim(),
       acceptedAnswers: [],
+      knownIncorrect: [],
       lastReviewed: null,
       suspended: false,
       recordMs: null,
@@ -173,6 +177,7 @@ export class PregenManager {
       "Cloze": async () => { const s = await generateCloze(body, apiKey, model); return [make(s, s)]; },
       "Solve Equation": async () => { const e = encodeSolveEquation(await generateSolveEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Place in Order": async () => { const e = encodeOrderSteps(await generateOrderSteps(body, apiKey, model)); return [make(e.question, e.answer)]; },
+      "List": async () => { const e = encodeList(await generateList(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Correct the Mistake": async () => { const r = await generateCorrectMistake(body, apiKey, model); return [make(r.incorrect, r.corrected)]; },
       "True/False": async () => {
         const r = await generateTrueFalse(body, apiKey, model);
@@ -191,24 +196,63 @@ export class PregenManager {
     if (!gen) return [];
     let variants = await gen();
 
-    const QC_TYPES: Set<string> = new Set(["Q&A", "Correct the Mistake"]);
+    const QC_TYPES: Set<string> = new Set(["Q&A"]);
     if (QC_TYPES.has(type)) {
-      const stdResults = await Promise.allSettled(
-        variants.map(v => standardizeQuestion(body, v.question, v.answer, apiKey)),
-      );
-      for (let i = 0; i < variants.length; i++) {
-        const r = stdResults[i];
-        if (r.status === "fulfilled" && r.value.question && r.value.answer) {
-          if (r.value.reject) {
-            if (r.value.reject_reason) {
-              console.debug(`[Iris QC] rejected: ${r.value.reject_reason}`);
+      const reframePromises: Promise<void>[] = [];
+      const reject = (i: number, reason: string) => {
+        console.debug(`[Iris QC] rejected: ${reason}`);
+        const original = variants[i];
+        variants[i] = { ...original, suspended: true };
+        reframePromises.push((async () => {
+          try {
+            const rf = await reframeQuestion(body, original.question, original.answer, reason, apiKey);
+            if (!rf.abandon && rf.question && rf.answer) {
+              variants[i] = {
+                ...original,
+                question: rf.question.trim(),
+                answer: rf.answer.trim(),
+                suspended: false,
+              };
             }
-            variants[i] = { ...variants[i], suspended: true };
-          } else {
-            variants[i] = { ...variants[i], question: r.value.question, answer: r.value.answer };
+          } catch (err) {
+            console.debug("[Iris QC] reframe failed", err);
+          }
+        })());
+      };
+
+      // Deterministic pre-screen: any answer longer than this is treated as
+      // rejected for length and routed to the reframer directly, skipping the
+      // standardize call. The standardizer's "distill the paragraph" rule is
+      // unreliable past a certain length — at that point the Q&A is almost
+      // always multi-fact and needs a fresh angle, not editing.
+      const MAX_QA_ANSWER_CHARS = 50;
+      const qcIndices: number[] = [];
+      for (let i = 0; i < variants.length; i++) {
+        if (variants[i].answer.length > MAX_QA_ANSWER_CHARS) {
+          reject(i, `Answer too long for a basic Q&A (${variants[i].answer.length} chars).`);
+        } else {
+          qcIndices.push(i);
+        }
+      }
+
+      if (qcIndices.length > 0) {
+        const stdResults = await Promise.allSettled(
+          qcIndices.map(i => standardizeQuestion(body, variants[i].question, variants[i].answer, apiKey)),
+        );
+        for (let k = 0; k < qcIndices.length; k++) {
+          const i = qcIndices[k];
+          const r = stdResults[k];
+          if (r.status === "fulfilled" && r.value.question && r.value.answer) {
+            if (r.value.reject) {
+              reject(i, r.value.reject_reason ?? "(no reason given)");
+            } else {
+              variants[i] = { ...variants[i], question: r.value.question.trim(), answer: r.value.answer.trim() };
+            }
           }
         }
       }
+
+      if (reframePromises.length > 0) await Promise.all(reframePromises);
     }
     return variants;
   }

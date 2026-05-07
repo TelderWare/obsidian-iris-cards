@@ -26,6 +26,10 @@ A problem requiring the learner to use a quantitative or mathematical relationsh
 Arrange steps of a process in the correct sequence.
 - Eligible when: the fact describes or implies a sequential process with 3 or more discrete, reorderable steps.
 - Ineligible when: the fact mentions a process but only 1-2 steps, or the order is trivially obvious.
+### List
+Free-recall an enumerable set of items, members, components, or examples.
+- Eligible when: the fact contains a discrete set of 2 or more items the learner is expected to recall as a group (e.g. the four humours, the cranial nerves, the components of a system).
+- Ineligible when: the fact has only one item, the items are not naturally grouped, or the set is open-ended.
 ### Correct the Mistake
 A version of the fact with a plausible error introduced; the learner identifies and fixes it.
 - Eligible when: the fact has enough internal structure (relationships, values, terminology, directionality) that a specific, believable error can be inserted.

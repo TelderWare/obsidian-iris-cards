@@ -1,4 +1,4 @@
-import { callClaudeTool, TITLE_HINT } from "../api/client";
+import { callClaudeTool, getRelay, TITLE_HINT } from "../api/client";
 
 const SYSTEM_PROMPT =
   "You are a flashcard generator. Given some information, generate exactly one question and one concise answer that tests recall. Name the specific subject in the question to anchor it. The answer must not be extractable from the question." + TITLE_HINT;
@@ -70,6 +70,15 @@ const JUDGE_TOOL = {
   },
 };
 
+/**
+ * Threshold for the bidirectional NLI vote. A pair is "correct" when at least
+ * one direction's entailment exceeds this AND neither direction's contradiction
+ * exceeds {@link NLI_CONTRADICTION_GUARD}. Tuned conservatively at 0.5 so the
+ * model errs toward the appeal pathway (Claude Opus) rather than auto-marking.
+ */
+const NLI_ENTAILMENT_THRESHOLD = 0.5;
+const NLI_CONTRADICTION_GUARD = 0.5;
+
 export async function markAnswer(
   question: string,
   correctAnswer: string,
@@ -77,6 +86,28 @@ export async function markAnswer(
   apiKey: string,
   model: string,
 ): Promise<boolean> {
+  // Prefer HF cross-encoder NLI when available. Marking is latency-critical
+  // (user is waiting after typing an answer) and the task is textbook NLI:
+  // does one answer entail the other? We check both directions to be lenient
+  // on partial answers and verbose answers alike, but flag any direction that
+  // looks like an outright contradiction.
+  const relay = getRelay();
+  if (relay?.isHFConfigured?.() && correctAnswer && userAnswer) {
+    try {
+      const [forward, backward] = await Promise.all([
+        relay.nli(userAnswer, correctAnswer, { callerId: "iris-cards:mark" }),
+        relay.nli(correctAnswer, userAnswer, { callerId: "iris-cards:mark" }),
+      ]);
+      const contradiction = Math.max(forward.contradiction, backward.contradiction);
+      if (contradiction > NLI_CONTRADICTION_GUARD) return false;
+      const entailment = Math.max(forward.entailment, backward.entailment);
+      return entailment > NLI_ENTAILMENT_THRESHOLD;
+    } catch (err) {
+      console.warn("iris-cards: HF NLI marking failed; falling back to Claude", err);
+      // fall through
+    }
+  }
+
   const r = await callClaudeTool<{ correct: boolean }>(
     apiKey, model, JUDGE_PROMPT,
     `Question: ${question}\nCorrect answer: ${correctAnswer}\nUser's answer: ${userAnswer}`,

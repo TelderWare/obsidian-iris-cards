@@ -20,6 +20,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
   let q = "";
   let a = "";
   let accepted: string[] = [];
+  let incorrect: string[] = [];
   let reviewed: string | null = null;
   let suspended = false;
   let recordMs: number | null = null;
@@ -29,7 +30,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
   const LEGACY_ALIASES: Record<string, ExerciseType> = { "Order Steps": "Place in Order" };
 
   const pushVariant = () => {
-    if (q && a) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, lastReviewed: reviewed, suspended, recordMs, difficulty });
+    if (q && a) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, knownIncorrect: incorrect, lastReviewed: reviewed, suspended, recordMs, difficulty });
   };
 
   for (const line of lines) {
@@ -41,6 +42,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
       a = "";
       type = "Q&A";
       accepted = [];
+      incorrect = [];
       reviewed = null;
       suspended = false;
       recordMs = null;
@@ -53,6 +55,8 @@ export function parseQABlock(fullContent: string): ParsedQA {
       if (exerciseSet.has(mapped)) type = mapped as ExerciseType;
     } else if (line.startsWith("Also accepted: ")) {
       accepted = line.slice(15).split(" | ").map(s => s.trim()).filter(Boolean);
+    } else if (line.startsWith("Known incorrect: ")) {
+      incorrect = line.slice(17).split(" | ").map(s => s.trim()).filter(Boolean);
     } else if (line.startsWith("Reviewed: ")) {
       reviewed = line.slice(10).trim() || null;
     } else if (line.startsWith("Suspended: ")) {
@@ -101,6 +105,7 @@ function mergeVariants(a: QAVariant, b: QAVariant): QAVariant {
   const primary = (a.lastReviewed ?? "") >= (b.lastReviewed ?? "") ? a : b;
   const secondary = primary === a ? b : a;
   const acceptedAnswers = Array.from(new Set([...primary.acceptedAnswers, ...secondary.acceptedAnswers]));
+  const knownIncorrect = Array.from(new Set([...primary.knownIncorrect, ...secondary.knownIncorrect]));
   const recordMs = primary.recordMs != null && secondary.recordMs != null
     ? Math.min(primary.recordMs, secondary.recordMs)
     : primary.recordMs ?? secondary.recordMs;
@@ -109,6 +114,7 @@ function mergeVariants(a: QAVariant, b: QAVariant): QAVariant {
     question: primary.question,
     answer: primary.answer,
     acceptedAnswers,
+    knownIncorrect,
     lastReviewed: primary.lastReviewed,
     suspended: primary.suspended || secondary.suspended,
     recordMs,
@@ -125,6 +131,9 @@ export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[
     }
     if (v.acceptedAnswers.length > 0) {
       entry += `\nAlso accepted: ${v.acceptedAnswers.join(" | ")}`;
+    }
+    if (v.knownIncorrect.length > 0) {
+      entry += `\nKnown incorrect: ${v.knownIncorrect.join(" | ")}`;
     }
     if (v.lastReviewed) {
       entry += `\nReviewed: ${v.lastReviewed}`;

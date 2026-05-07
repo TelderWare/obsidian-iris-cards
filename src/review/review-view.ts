@@ -1,8 +1,11 @@
-import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Menu, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type IrisCardsPlugin from "../main";
-import { getDueCards, getAllCards, getModules } from "../leitner";
+import { getDueCards, getAllCards, getModules, migrateDifficulty, type InfiniteSort } from "../leitner";
 import { type QAVariant } from "../types/exercises";
-import { renderCurrentCard, renderUpcomingPreviews } from "./renderers";
+import { renderCurrentCard, renderUpcomingPreviews, createAnswerHandler } from "./renderers";
+import { AudioReviewController } from "./audio-controller";
+import { isAudioSupported, questionTextForAudio } from "./audio-text";
+import { BrowseModal } from "./browse-modal";
 import { hasRelay } from "../api/client";
 
 export const VIEW_TYPE_REVIEW = "iris-cards-review";
@@ -21,7 +24,9 @@ export class ReviewView extends ItemView {
   currentCard: TFile | null = null;
   private doneCheckInterval: number | null = null;
   infiniteMode = false;
+  infiniteSort: InfiniteSort = "filename";
   moduleFilter = new Set<string>();
+  noteFilter: string | null = null;
   shownVariants = new Set<string>();
   scrollBody: HTMLDivElement | null = null;
   layoutReady = false;
@@ -31,6 +36,9 @@ export class ReviewView extends ItemView {
   currentCardEl: HTMLElement | null = null;
   currentVariant: QAVariant | null = null;
   peekedAnswer = false;
+  audioMode = false;
+  audioController: AudioReviewController | null = null;
+  private audioStatusEl: HTMLElement | null = null;
   scrollAnimId = 0;
   previewGenId = 0;
   renderStateCache = new Map<string, Record<string, unknown>>();
@@ -45,11 +53,11 @@ export class ReviewView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Cards";
+    return this.noteFilter ? `Cards: ${this.noteFilter}` : "Cards";
   }
 
   getIcon(): string {
-    return "brain";
+    return "loader";
   }
 
   async onOpen(): Promise<void> {
@@ -62,10 +70,19 @@ export class ReviewView extends ItemView {
   async onClose(): Promise<void> {
     this.plugin.reviewViews.delete(this);
     this.clearDoneCheck();
+    this.audioController?.destroy();
+    this.audioController = null;
     this.sndCorrect = null;
     this.sndIncorrect = null;
     this.layoutReady = false;
     this.contentEl.empty();
+  }
+
+  async setNoteFilter(noteName: string | null): Promise<void> {
+    this.noteFilter = noteName;
+    this.layoutReady = false;
+    this.shownVariants.clear();
+    await this.loadDueCards();
   }
 
   getRenderState(cardFile: TFile, variant: QAVariant): Record<string, unknown> {
@@ -86,9 +103,11 @@ export class ReviewView extends ItemView {
   }
 
   async loadDueCards(): Promise<void> {
+    const mf = this.moduleFilter.size > 0 ? this.moduleFilter : undefined;
+    const nf = this.noteFilter ?? undefined;
     this.dueCards = this.infiniteMode
-      ? await getAllCards(this.app, this.plugin.settings.cardsFolder, this.moduleFilter.size > 0 ? this.moduleFilter : undefined)
-      : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
+      ? await getAllCards(this.app, this.plugin.settings.cardsFolder, mf, this.infiniteSort, nf)
+      : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, mf, this.plugin.settings.desiredRetention, nf);
     if (this.dueCards.length === 0) {
       this.renderDoneCard();
       return;
@@ -140,57 +159,163 @@ export class ReviewView extends ItemView {
       }
     });
 
-    makeToggle("infinity", "Infinite mode", this.infiniteMode, async (v) => {
-      this.infiniteMode = v;
+    makeToggle("headphones", "Audio mode", this.audioMode, async (v) => {
+      if (v) {
+        const relay = (this.plugin.app as any).irisRelay;
+        const hasRelay = relay?.isElevenLabsConfigured?.();
+        if (!hasRelay && !this.plugin.settings.elevenLabsApiKey) {
+          new Notice("Set your ElevenLabs API key in Iris Cards settings or Iris Router first.");
+          this.audioMode = false;
+          this.layoutReady = false;
+          this.ensureLayout();
+          return;
+        }
+        if (!this.plugin.settings.elevenLabsVoiceId) {
+          new Notice("Select a voice in Iris Cards settings first.");
+          this.audioMode = false;
+          this.layoutReady = false;
+          this.ensureLayout();
+          return;
+        }
+        this.audioMode = true;
+        this.audioController = new AudioReviewController(this.plugin);
+        if (this.currentCard && this.currentVariant) {
+          await this.startAudioForCurrentCard();
+        }
+      } else {
+        this.audioMode = false;
+        this.audioController?.destroy();
+        this.audioController = null;
+        if (this.audioStatusEl) this.audioStatusEl.textContent = "";
+      }
+    });
+
+    // Infinite mode toggle. Hovering (in infinite mode) opens a native Menu
+    // for queue sort order; right-click also opens it for keyboard/touch users.
+    const infBtn = headerCenter.createEl("button", { cls: "iris-toggle clickable-icon", attr: { "aria-label": "Infinite mode" } });
+    setIcon(infBtn, "infinity");
+    infBtn.toggleClass("is-active", this.infiniteMode);
+    infBtn.addEventListener("click", async () => {
+      this.infiniteMode = !this.infiniteMode;
+      infBtn.toggleClass("is-active", this.infiniteMode);
       this.shownVariants.clear();
       this.layoutReady = false;
       await this.loadDueCards();
     });
 
-    // Module filter — icon button with dropdown checklist
+    const sortItems: { value: InfiniteSort; label: string; icon: string }[] = [
+      { value: "filename", label: "Filename", icon: "case-sensitive" },
+      { value: "least-reps", label: "Least repetitions", icon: "rotate-ccw" },
+      { value: "random", label: "Random", icon: "shuffle" },
+    ];
+    let sortMenu: Menu | null = null;
+    const openSortMenu = () => {
+      if (!this.infiniteMode || sortMenu) return;
+      const menu = new Menu();
+      for (const opt of sortItems) {
+        menu.addItem(item =>
+          item
+            .setTitle(opt.label)
+            .setIcon(opt.icon)
+            .setChecked(this.infiniteSort === opt.value)
+            .onClick(async () => {
+              this.infiniteSort = opt.value;
+              this.shownVariants.clear();
+              this.layoutReady = false;
+              await this.loadDueCards();
+            }),
+        );
+      }
+      menu.onHide(() => { sortMenu = null; });
+      const rect = infBtn.getBoundingClientRect();
+      menu.showAtPosition({ x: rect.left, y: rect.bottom + 2 });
+      sortMenu = menu;
+    };
+    infBtn.addEventListener("mouseenter", openSortMenu);
+    infBtn.addEventListener("contextmenu", (e) => { e.preventDefault(); openSortMenu(); });
+
+    // Module filter — icon button with floating panel attached to document.body (JS-positioned to sidestep parent CSS issues)
     const modules = getModules(this.app, this.plugin.settings.cardsFolder);
     if (modules.length > 0) {
-      const filterWrap = headerLeft.createDiv({ cls: "iris-filter-wrap" });
-      const filterBtn = filterWrap.createEl("button", { cls: "iris-toggle", attr: { "aria-label": "Filter by module" } });
+      const filterBtn = headerLeft.createEl("button", { cls: "iris-toggle clickable-icon", attr: { "aria-label": "Filter by module" } });
       setIcon(filterBtn, "list-filter");
-      const dropdown = filterWrap.createDiv({ cls: "iris-filter-dropdown iris-hidden" });
 
       const updateBtn = () => {
         filterBtn.toggleClass("iris-toggle-active", this.moduleFilter.size > 0);
       };
       updateBtn();
 
-      for (const m of modules) {
-        const row = dropdown.createDiv({ cls: "iris-filter-row" });
-        const cb = row.createEl("input", { type: "checkbox", attr: { id: `iris-mod-${m}` } });
-        cb.checked = this.moduleFilter.has(m);
-        row.createEl("label", { text: m, attr: { for: `iris-mod-${m}` } });
-        cb.addEventListener("change", async () => {
-          if (cb.checked) this.moduleFilter.add(m);
-          else this.moduleFilter.delete(m);
-          updateBtn();
-          this.layoutReady = false;
-          await this.loadDueCards();
-        });
-      }
+      let panel: HTMLDivElement | null = null;
+      let onMouseDown: ((e: MouseEvent) => void) | null = null;
+      let onKeyDown: ((e: KeyboardEvent) => void) | null = null;
+
+      const closePanel = () => {
+        if (!panel) return;
+        if (onMouseDown) document.removeEventListener("mousedown", onMouseDown, true);
+        if (onKeyDown) document.removeEventListener("keydown", onKeyDown, true);
+        onMouseDown = null;
+        onKeyDown = null;
+        panel.remove();
+        panel = null;
+      };
+
+      const openPanel = () => {
+        const rect = filterBtn.getBoundingClientRect();
+        panel = document.body.createDiv({ cls: "iris-filter-dropdown" }) as HTMLDivElement;
+        panel.style.position = "fixed";
+        panel.style.top = `${rect.bottom + 4}px`;
+        panel.style.left = `${rect.left}px`;
+        panel.style.zIndex = "1000";
+
+        for (const m of modules) {
+          const row = panel.createDiv({ cls: "iris-filter-row" });
+          const cb = row.createEl("input", { type: "checkbox", attr: { id: `iris-mod-${m}` } });
+          cb.checked = this.moduleFilter.has(m);
+          row.createEl("label", { text: m, attr: { for: `iris-mod-${m}` } });
+          cb.addEventListener("change", async () => {
+            if (cb.checked) this.moduleFilter.add(m);
+            else this.moduleFilter.delete(m);
+            updateBtn();
+            this.layoutReady = false;
+            await this.loadDueCards();
+          });
+        }
+
+        onMouseDown = (e: MouseEvent) => {
+          const target = e.target as Node;
+          if (panel && !panel.contains(target) && !filterBtn.contains(target)) {
+            closePanel();
+          }
+        };
+        onKeyDown = (e: KeyboardEvent) => {
+          if (e.key === "Escape") closePanel();
+        };
+        document.addEventListener("mousedown", onMouseDown, true);
+        document.addEventListener("keydown", onKeyDown, true);
+      };
 
       filterBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        dropdown.toggleClass("iris-hidden", !dropdown.hasClass("iris-hidden"));
+        if (panel) closePanel();
+        else openPanel();
       });
 
-      // Close dropdown when clicking outside
-      this.registerDomEvent(document, "click", (e) => {
-        if (!filterWrap.contains(e.target as Node)) {
-          dropdown.addClass("iris-hidden");
-        }
-      });
+      this.register(() => closePanel());
     }
 
     const headerRight = header.createDiv({ cls: "iris-header-right" });
 
+    const browseBtn = headerRight.createEl("button", {
+      cls: "iris-toggle clickable-icon",
+      attr: { "aria-label": "Browse facts" },
+    });
+    setIcon(browseBtn, "book-open");
+    browseBtn.addEventListener("click", () => {
+      new BrowseModal(this.app, this.plugin.settings.cardsFolder).open();
+    });
+
     const clearCache = headerRight.createEl("button", {
-      cls: "iris-toggle",
+      cls: "iris-toggle clickable-icon",
       attr: { "aria-label": "Clear question cache" },
     });
     setIcon(clearCache, "trash-2");
@@ -201,6 +326,9 @@ export class ReviewView extends ItemView {
 
     // Scrollable body
     this.scrollBody = container.createDiv({ cls: "iris-scroll-body" });
+
+    // Audio mode status bar (hidden when not in audio mode)
+    this.audioStatusEl = container.createDiv({ cls: "iris-audio-status" });
 
     this.layoutReady = true;
   }
@@ -242,7 +370,7 @@ export class ReviewView extends ItemView {
 
     // Poll for newly due cards
     this.doneCheckInterval = window.setInterval(async () => {
-      const cards = await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention);
+      const cards = await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, this.moduleFilter.size > 0 ? this.moduleFilter : undefined, this.plugin.settings.desiredRetention, this.noteFilter ?? undefined);
       if (cards.length > 0) {
         this.clearDoneCheck();
         this.dueCards = cards;
@@ -264,7 +392,7 @@ export class ReviewView extends ItemView {
 
     if (this.dueCards.length === 0) {
       this.renderDoneCard();
-      this.plugin.updateBadge();
+      this.plugin.updateBadge(0);
       return;
     }
 
@@ -301,18 +429,13 @@ export class ReviewView extends ItemView {
     loadingCard.createEl("p", { text: "Generating question\u2026", cls: "iris-loading" });
     this.scrollToCenter(loadingCard);
 
-    let variants: QAVariant[];
+    let variants: QAVariant[] = [];
     try {
       const cached = this.plugin.qaCache.get(this.currentCard.path);
-      if (!cached) throw new Error("No QA data found for this card");
-      variants = await cached;
-    } catch (e) {
-      loadingCard.empty();
-      loadingCard.createEl("p", {
-        text: `Error generating Q&A: ${e instanceof Error ? e.message : String(e)}`,
-        cls: "iris-error",
-      });
-      return;
+      if (cached) variants = await cached;
+    } catch {
+      // Pregen falls back to existing variants on error; if anything still
+      // bubbles up here, treat the card as having no usable variants.
     }
 
     loadingCard.remove();
@@ -320,7 +443,7 @@ export class ReviewView extends ItemView {
     // Pool reviewable variants
     const active = variants.filter(v => !v.suspended);
     if (active.length === 0) {
-      // All variants suspended — skip this card entirely
+      // No usable variants (generation failed with no fallback, or all suspended) — skip this card
       this.dueCards.shift();
       await this.showNextCard();
       return;
@@ -329,8 +452,8 @@ export class ReviewView extends ItemView {
     // Pick variant: prefer harder questions (higher difficulty), then oldest-reviewed
     const pickHardest = (pool: QAVariant[]): QAVariant =>
       pool.reduce((best, v) => {
-        const bD = best.difficulty ?? 0.5;
-        const vD = v.difficulty ?? 0.5;
+        const bD = migrateDifficulty(best.difficulty);
+        const vD = migrateDifficulty(v.difficulty);
         if (vD > bD) return v;
         if (vD < bD) return best;
         // Equal difficulty: prefer never-reviewed, then oldest-reviewed
@@ -352,6 +475,50 @@ export class ReviewView extends ItemView {
     // Create card
     this.currentVariant = variant;
     await renderCurrentCard(this, body, cardFile, variant);
+
+    if (this.audioMode && this.audioController) {
+      await this.startAudioForCurrentCard();
+    }
+  }
+
+  private async startAudioForCurrentCard(): Promise<void> {
+    if (!this.audioController || !this.currentCard || !this.currentVariant || !this.currentCardEl) return;
+
+    // Auto-skip exercise types that aren't supported in audio mode (e.g. Image
+    // Occlusion is visual-only; Multiple Choice / Solve Equation / Place in
+    // Order / Assemble Equation don't translate well to audio yet).
+    if (!isAudioSupported(this.currentVariant.exerciseType)) {
+      const skipped = this.dueCards.shift();
+      if (skipped && this.infiniteMode) this.dueCards.push(skipped);
+      await this.showNextCard();
+      return;
+    }
+
+    const cardFile = this.currentCard;
+    const variant = this.currentVariant;
+    const renderState = this.getRenderState(cardFile, variant);
+    const answerFn = createAnswerHandler(this, this.currentCardEl, cardFile, variant);
+
+    // Best-effort lookup of the next card's likely audio question text.
+    // Only prewarm types where the spoken text is deterministic given the
+    // variant — T/F and Cloze randomize what gets read, so a prewarm there
+    // would frequently miss.
+    const prewarmNext = async (): Promise<string | null> => {
+      const next = this.dueCards[1];
+      if (!next) return null;
+      const cachedPromise = this.plugin.qaCache.get(next.path);
+      if (!cachedPromise) return null;
+      let variants: QAVariant[];
+      try { variants = await cachedPromise; } catch { return null; }
+      const candidate = variants.find(v =>
+        !v.suspended &&
+        (v.exerciseType === "Q&A" || v.exerciseType === "Correct the Mistake" || v.exerciseType === "List"),
+      );
+      if (!candidate) return null;
+      return questionTextForAudio(candidate, {});
+    };
+
+    await this.audioController.start(variant, cardFile, answerFn, renderState, this.audioStatusEl!, prewarmNext);
   }
 
   private playBuzz(): void {
@@ -377,7 +544,10 @@ export class ReviewView extends ItemView {
   }
 
   playFeedback(correct: boolean, record?: boolean): void {
-    if (this.plugin.settings.soundFeedback) {
+    // In audio mode the controller speaks "Correct!" / "Incorrect." via TTS,
+    // so the chime/buzz would just step on it. Visual feedback (flash, record
+    // icon) still fires because it's silent.
+    if (this.plugin.settings.soundFeedback && !this.audioMode) {
       if (correct) {
         if (this.sndCorrect) {
           this.sndCorrect.currentTime = 0;
@@ -401,10 +571,9 @@ export class ReviewView extends ItemView {
     }
   }
 
-  async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number): Promise<void> {
+  async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number, gapTerm?: string): Promise<void> {
     // Freeze the current card as answered — disable interactions, keep answer visible
     if (this.currentCardEl) {
-      this.currentCardEl.style.minHeight = `${this.currentCardEl.offsetHeight}px`;
       this.currentCardEl.addClass("iris-card-answered");
       // Reveal answer in manual mode
       this.currentCardEl.querySelectorAll(".iris-answer").forEach(el => el.removeClass("iris-hidden"));
@@ -418,7 +587,7 @@ export class ReviewView extends ItemView {
 
     // If the user peeked at the parent note, skip recording — it's not a genuine review
     if (!this.peekedAnswer) {
-      await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs);
+      await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs, gapTerm);
       for (const other of this.plugin.reviewViews) {
         if (other !== this) other.handleExternalRate(file);
       }
@@ -436,7 +605,7 @@ export class ReviewView extends ItemView {
     } else {
       this.dueCards.shift();
     }
-    this.plugin.updateBadge();
+    this.plugin.updateBadge(this.dueCards.length);
     await this.showNextCard();
   }
 
@@ -447,11 +616,11 @@ export class ReviewView extends ItemView {
     if (idx === -1) return;
     if (idx === 0 && this.currentCard?.path === file.path) {
       this.dueCards.shift();
-      this.plugin.updateBadge();
+      this.plugin.updateBadge(this.dueCards.length);
       await this.showNextCard();
     } else {
       this.dueCards.splice(idx, 1);
-      this.plugin.updateBadge();
+      this.plugin.updateBadge(this.dueCards.length);
       if (this.scrollBody) {
         this.scrollBody.querySelectorAll(".iris-card-preview").forEach(el => el.remove());
         await renderUpcomingPreviews(this, this.scrollBody);

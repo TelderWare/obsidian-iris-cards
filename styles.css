@@ -184,6 +184,12 @@
   pointer-events: none;
 }
 
+.iris-card-placeholder {
+  /* Pre-render slot for previews past the eager-render cap.
+     An IntersectionObserver upgrades these to real cards on scroll. */
+  opacity: 0.35;
+}
+
 .iris-question {
   font-size: 1.4em;
   line-height: 1.5;
@@ -231,7 +237,7 @@ button.iris-right-btn {
   border: none;
   cursor: pointer;
   box-shadow: none;
-  border-radius: 0;
+  border-radius: var(--radius-s);
 }
 
 .iris-wrong-btn {
@@ -239,9 +245,7 @@ button.iris-right-btn {
 }
 
 .iris-wrong-btn:hover {
-  color: var(--text-on-accent);
-  background: var(--background-modifier-error);
-  border-radius: 50%;
+  background: var(--background-modifier-hover);
 }
 
 .iris-right-btn {
@@ -249,9 +253,7 @@ button.iris-right-btn {
 }
 
 .iris-right-btn:hover {
-  color: var(--text-on-accent);
-  background: var(--interactive-accent);
-  border-radius: 50%;
+  background: var(--background-modifier-hover);
 }
 
 .iris-hidden {
@@ -304,11 +306,32 @@ input.iris-answer-input:focus {
   box-shadow: none;
 }
 
+input.iris-answer-input:disabled {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  padding: 4px 0;
+  color: var(--text-normal);
+  opacity: 1;
+  cursor: default;
+}
+
 .iris-marking {
   margin-top: 24px;
   font-weight: 600;
   font-size: 1.1em;
-  min-height: 1.1em;
+  line-height: 1.5;
+  height: 1.5em;
+  /* Lock height in flex column: flex items default to min-height: auto,
+     which lets the line-box (especially italic loading state) grow past
+     `height` and stretch the card. */
+  min-height: 0;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .iris-marking-correct {
@@ -384,7 +407,6 @@ input.iris-answer-input:focus {
 
 .iris-loading {
   color: var(--text-muted);
-  font-style: italic;
   animation: iris-pulse 1.2s ease-in-out infinite;
 }
 
@@ -421,7 +443,75 @@ button.iris-card-icon {
 .iris-suspend-btn { top: 10px; left: 14px; }
 .iris-parent-btn { top: 10px; right: 14px; }
 .iris-skip-card-btn { bottom: 10px; right: 14px; }
-.iris-appeal-icon { bottom: 10px; left: 14px; }
+.iris-card-file-btn { bottom: 10px; left: 14px; }
+.iris-appeal-icon { bottom: 38px; left: 14px; }
+
+/* Solve Equation */
+.iris-solve-question {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.iris-solve-problem {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.iris-solve-knowns {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: fit-content;
+  padding: 12px 20px;
+  background: var(--background-primary);
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+
+.iris-solve-known p {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.iris-solve-target {
+  text-align: center;
+  font-size: 1.05em;
+}
+
+.iris-solve-target p {
+  margin: 0;
+}
+
+/* List — free-recall, N input boxes, unordered */
+.iris-list-inputs {
+  width: 100%;
+  max-width: 500px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.iris-list-row {
+  display: flex;
+}
+
+.iris-list-input {
+  flex: 1;
+}
+
+.iris-list-input.iris-list-correct {
+  border-color: var(--interactive-accent) !important;
+}
+
+.iris-list-input.iris-list-incorrect {
+  border-color: var(--text-error) !important;
+}
+
+.iris-list-check {
+  margin-top: 8px;
+}
 
 /* Order Steps — drag-to-reorder */
 .iris-order-list {
@@ -462,14 +552,6 @@ button.iris-card-icon {
 .iris-order-handle .svg-icon {
   width: 14px;
   height: 14px;
-}
-
-.iris-order-num {
-  font-weight: 600;
-  color: var(--text-muted);
-  min-width: 18px;
-  text-align: center;
-  flex-shrink: 0;
 }
 
 .iris-order-text {
@@ -607,4 +689,349 @@ button.iris-card-icon {
 
 .iris-teaching-modal .iris-retry-btn:hover {
   opacity: 0.9;
+}
+
+/* Peek modal — previews parent note / card file without leaving the review */
+.iris-peek-modal-wrap {
+  width: 90vw;
+  max-width: 800px;
+  max-height: 80vh;
+}
+
+.iris-peek-modal {
+  padding: 0;
+}
+
+.iris-peek-content {
+  max-height: 65vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 20px 24px;
+  font-size: 1em;
+  line-height: 1.7;
+}
+
+/* Browse facts modal */
+.iris-browse-modal-wrap {
+  width: 90vw;
+  max-width: 700px;
+  max-height: 80vh;
+}
+
+.iris-browse-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 65vh;
+}
+
+input.iris-browse-search {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 14px;
+  outline: none;
+  box-shadow: none;
+}
+
+input.iris-browse-search:focus {
+  border-color: var(--interactive-accent);
+}
+
+.iris-browse-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.iris-browse-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  transition: background 0.1s ease;
+}
+
+.iris-browse-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.iris-browse-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.iris-browse-body {
+  font-size: 13px;
+  color: var(--text-normal);
+  line-height: 1.4;
+}
+
+.iris-browse-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+button.iris-browse-delete {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  color: var(--text-faint);
+  opacity: 0;
+  padding: 6px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.1s ease, color 0.1s ease, background 0.1s ease;
+}
+
+.iris-browse-row:hover .iris-browse-delete {
+  opacity: 0.6;
+}
+
+.iris-browse-delete:hover {
+  opacity: 1 !important;
+  color: var(--text-error);
+  background: var(--background-modifier-hover);
+}
+
+.iris-browse-delete.iris-browse-delete-confirm {
+  opacity: 1;
+  color: var(--text-on-accent);
+  background: var(--text-error);
+}
+
+.iris-browse-delete.iris-browse-delete-confirm:hover {
+  background: var(--text-error);
+}
+
+.iris-browse-delete .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.iris-browse-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 40px 0;
+}
+
+/* Homepage widget — reuses .iris-card and friends from the full review view. */
+.iris-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  position: relative;
+}
+
+.iris-widget .iris-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 14px 12px;
+  max-width: none;
+  /* The homepage wrapper already draws the card chrome (border + background
+     + radius). Drop the inner border so we don't nest one inside the other. */
+  border: none;
+  background: transparent;
+  border-radius: 0;
+}
+
+.iris-widget .iris-question {
+  font-size: 1em;
+  max-width: none;
+}
+
+.iris-widget .iris-answer {
+  max-width: none;
+  margin-top: 12px;
+  padding-top: 8px;
+}
+
+.iris-widget button.iris-show-btn {
+  margin-top: 14px;
+}
+
+.iris-widget .iris-actions {
+  padding-top: 10px;
+}
+
+
+/* ─── Image Occlusion (review) ────────────────────────────────── */
+.iris-image-occlusion-question {
+  display: block;
+}
+.iris-image-occlusion-wrapper {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+.iris-image-occlusion-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  user-select: none;
+}
+.iris-occlusion-box {
+  position: absolute;
+  background: var(--background-modifier-border-hover, #555);
+  border: 1px solid var(--background-modifier-border, #333);
+  pointer-events: none;
+}
+
+/* ─── Image Occlusion Editor (modal) ──────────────────────────── */
+.iris-occlusion-editor-wrap {
+  width: min(90vw, 1100px);
+  max-width: 90vw;
+}
+.iris-occlusion-editor-wrap .modal-content {
+  max-height: 90vh;
+  overflow: auto;
+}
+.iris-occlusion-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.iris-occlusion-editor-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.iris-occlusion-editor-header h2 {
+  margin: 0;
+}
+.iris-occlusion-editor-status {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+.iris-occlusion-editor-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.iris-occlusion-editor-help {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  flex-basis: 100%;
+}
+.iris-occlusion-editor-stage {
+  position: relative;
+  display: inline-block;
+  align-self: flex-start;
+  max-width: 100%;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.iris-occlusion-editor-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.iris-occlusion-editor-overlay {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+}
+.iris-occlusion-editor-box {
+  position: absolute;
+  background: rgba(80, 80, 80, 0.45);
+  border: 2px solid var(--text-accent);
+  cursor: move;
+  box-sizing: border-box;
+}
+.iris-occlusion-editor-box-selected {
+  background: rgba(80, 80, 80, 0.65);
+  border-color: var(--interactive-accent);
+  z-index: 2;
+}
+.iris-occlusion-editor-box-label {
+  position: absolute;
+  top: -1.6em;
+  left: 0;
+  padding: 0 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 0.8em;
+  white-space: nowrap;
+  pointer-events: none;
+  border-radius: 2px;
+}
+.iris-occlusion-editor-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  background: var(--interactive-accent);
+  border: 1px solid var(--background-primary);
+  cursor: nwse-resize;
+}
+.iris-occlusion-editor-label {
+  position: absolute;
+  top: -2em;
+  left: 0;
+  width: max(120px, 100%);
+  padding: 2px 6px;
+  font-size: 0.85em;
+  z-index: 3;
+}
+.iris-occlusion-editor-delete {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--background-modifier-error);
+  color: var(--text-on-accent);
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 4;
+}
+.iris-occlusion-editor-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.iris-suggest-path {
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+
+/* Audio review mode */
+.iris-audio-status {
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 0.9em;
+  color: var(--text-muted);
+  min-height: 1.5em;
+}
+.iris-audio-status:empty {
+  display: none;
 }

@@ -5,6 +5,12 @@ import { App, requestUrl } from "obsidian";
 let _app: App | undefined;
 export function setRelayApp(app: App): void { _app = app; }
 export function hasRelay(): boolean { return !!(_app as any)?.irisRelay; }
+/**
+ * Return the iris-router relay instance if mounted, else undefined. Use this
+ * when you need methods beyond `request()` (classify, nli, embed). Always
+ * null-check the return AND the specific method before calling.
+ */
+export function getRelay(): any | undefined { return (_app as any)?.irisRelay; }
 
 /** Relay priority for the current batch (0-10, lower = first). Default 5. */
 let _relayPriority: number | undefined;
@@ -79,7 +85,7 @@ async function apiRequest(apiKey: string, body: object, relayPriority?: number):
 /** Call Claude with a tool and return the tool_use input block. */
 export async function callClaudeTool<T>(
   apiKey: string, model: string, system: string,
-  content: string, tool: object, maxTokens: number,
+  content: string | unknown[], tool: object, maxTokens: number,
   temperature?: number,
 ): Promise<T> {
   const toolName = (tool as { name: string }).name;

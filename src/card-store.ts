@@ -1,7 +1,8 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import { type QAVariant, type ExerciseType } from "./types/exercises";
 import { parseQABlock, stripQABlock, buildQABlock, dedupeVariants } from "./types/qa-block";
-import { getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog } from "./leitner";
+import { encodeGapAlt, decodeGapAlt } from "./types/gap-alternates";
+import { getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog, initialStability, initialDifficulty, retrievability, daysSince, migrateDifficulty } from "./leitner";
 
 function normalizeAnswer(s: string): string {
   return s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
@@ -87,6 +88,7 @@ export class CardStore {
     questionShown?: string,
     userAnswer?: string,
     elapsedMs?: number,
+    gapTerm?: string,
   ): Promise<void> {
     // Read variant difficulty before updating frontmatter so the stability
     // calculation uses the reviewed variant's difficulty, not the file-level one.
@@ -94,39 +96,77 @@ export class CardStore {
     if (questionShown) {
       const content = await this.app.vault.cachedRead(file);
       const parsed = parseQABlock(content);
-      const v = parsed.variants.find(v => v.question === questionShown);
-      if (v) variantD = v.difficulty ?? undefined;
+      const v = parsed.variants.find(v => v.question.trim() === questionShown.trim());
+      if (v && v.difficulty != null) variantD = migrateDifficulty(v.difficulty);
     }
 
     await this.app.fileManager.processFrontMatter(file, (fm) => {
-      const S = getStability(fm);
-      const D = variantD ?? getDifficulty(fm);
-      const newS = updateStability(S, correct, D, elapsedMs);
+      const reps = (fm["repetitions"] as number | undefined) ?? 0;
+      let newS: number;
+      let newD: number;
+      if (reps === 0) {
+        newS = initialStability(correct);
+        newD = initialDifficulty(correct);
+      } else {
+        const S = getStability(fm);
+        const D = variantD ?? getDifficulty(fm);
+        const R = retrievability(daysSince(fm["last-reviewed"] as string | undefined), S);
+        newS = updateStability(S, D, correct, R);
+        newD = updateDifficulty(getDifficulty(fm), correct);
+      }
       fm["stability"] = newS;
-      fm["difficulty"] = updateDifficulty(getDifficulty(fm), correct);
+      fm["difficulty"] = newD;
       delete fm["box"];
       fm["last-reviewed"] = new Date().toISOString();
-      fm["repetitions"] = (fm["repetitions"] ?? 0) + 1;
+      fm["repetitions"] = reps + 1;
       appendReviewLog(fm, buildLogEntry(correct, elapsedMs));
     });
 
     if (questionShown) {
       await this.updateVariants(file, (variants) => {
-        const idx = variants.findIndex(v => v.question === questionShown);
+        const idx = variants.findIndex(v => v.question.trim() === questionShown.trim());
         if (idx === -1) return;
         const v = variants[idx];
-        const vD = v.difficulty ?? 0.5;
+        const newVD = v.difficulty == null || v.lastReviewed == null
+          ? initialDifficulty(correct)
+          : updateDifficulty(migrateDifficulty(v.difficulty), correct);
         const updated: QAVariant = {
           ...v,
           lastReviewed: new Date().toISOString(),
-          difficulty: updateDifficulty(vD, correct),
+          difficulty: newVD,
         };
 
         if (correct && userAnswer) {
           const norm = normalizeAnswer(userAnswer);
-          const all = [v.answer, ...v.acceptedAnswers];
-          if (!all.some(a => normalizeAnswer(a) === norm)) {
-            updated.acceptedAnswers = [...v.acceptedAnswers, userAnswer.trim()];
+          const canonicalNorms = gapTerm
+            ? [normalizeAnswer(gapTerm)]
+            : [normalizeAnswer(v.answer)];
+          const existingNorms = v.acceptedAnswers
+            .map(decodeGapAlt)
+            .filter(d => gapTerm ? (d.term === gapTerm || d.term === null) : d.term === null)
+            .map(d => normalizeAnswer(d.alt));
+          if (![...canonicalNorms, ...existingNorms].includes(norm)) {
+            const entry = gapTerm ? encodeGapAlt(gapTerm, userAnswer.trim()) : userAnswer.trim();
+            updated.acceptedAnswers = [...v.acceptedAnswers, entry];
+          }
+        }
+
+        if (!correct && userAnswer) {
+          const norm = normalizeAnswer(userAnswer);
+          const canonicalNorms = gapTerm
+            ? [normalizeAnswer(gapTerm)]
+            : [normalizeAnswer(v.answer)];
+          const acceptedNorms = v.acceptedAnswers
+            .map(decodeGapAlt)
+            .filter(d => gapTerm ? (d.term === gapTerm || d.term === null) : d.term === null)
+            .map(d => normalizeAnswer(d.alt));
+          const existingNorms = v.knownIncorrect
+            .map(decodeGapAlt)
+            .filter(d => gapTerm ? (d.term === gapTerm || d.term === null) : d.term === null)
+            .map(d => normalizeAnswer(d.alt));
+          if (![...canonicalNorms, ...acceptedNorms, ...existingNorms].includes(norm)) {
+            const entry = gapTerm ? encodeGapAlt(gapTerm, userAnswer.trim()) : userAnswer.trim();
+            updated.knownIncorrect = [...v.knownIncorrect, entry];
           }
         }
 
@@ -140,15 +180,22 @@ export class CardStore {
   }
 
   /** Add a user answer as accepted for a variant (used after successful appeal). */
-  async addAcceptedAnswer(file: TFile, questionShown: string, userAnswer: string): Promise<void> {
+  async addAcceptedAnswer(file: TFile, questionShown: string, userAnswer: string, gapTerm?: string): Promise<void> {
     await this.updateVariants(file, (variants) => {
-      const idx = variants.findIndex(v => v.question === questionShown);
+      const idx = variants.findIndex(v => v.question.trim() === questionShown.trim());
       if (idx === -1) return;
       const v = variants[idx];
       const norm = normalizeAnswer(userAnswer);
-      const all = [v.answer, ...v.acceptedAnswers];
-      if (!all.some(a => normalizeAnswer(a) === norm)) {
-        variants[idx] = { ...v, acceptedAnswers: [...v.acceptedAnswers, userAnswer.trim()] };
+      const canonicalNorms = gapTerm
+        ? [normalizeAnswer(gapTerm)]
+        : [normalizeAnswer(v.answer)];
+      const existingNorms = v.acceptedAnswers
+        .map(decodeGapAlt)
+        .filter(d => gapTerm ? (d.term === gapTerm || d.term === null) : d.term === null)
+        .map(d => normalizeAnswer(d.alt));
+      if (![...canonicalNorms, ...existingNorms].includes(norm)) {
+        const entry = gapTerm ? encodeGapAlt(gapTerm, userAnswer.trim()) : userAnswer.trim();
+        variants[idx] = { ...v, acceptedAnswers: [...v.acceptedAnswers, entry] };
       }
     });
   }
@@ -156,7 +203,7 @@ export class CardStore {
   /** Suspend a specific variant by question text. Returns remaining active variants. */
   async suspendVariant(file: TFile, questionText: string): Promise<QAVariant[]> {
     const variants = await this.updateVariants(file, (variants) => {
-      const idx = variants.findIndex(v => v.question === questionText);
+      const idx = variants.findIndex(v => v.question.trim() === questionText.trim());
       if (idx !== -1) {
         variants[idx] = { ...variants[idx], suspended: true };
       }

@@ -1,15 +1,15 @@
 import { callClaudeTool, TITLE_HINT } from "../api/client";
 
 const SOLVE_EQUATION_PROMPT =
-  "You are an exercise generator. Given a fact containing an equation or quantitative relationship, generate a problem template. Describe a scenario that requires the learner to identify and apply the correct equation. Define each known variable with a name, a realistic range (min and max), units, and number of significant figures. Specify which variable the learner must solve for. Do not name or provide the equation in the scenario." + TITLE_HINT;
+  "You are an exercise generator. Given a fact containing an equation or quantitative relationship, generate a problem template. State the problem directly — no narrator or word-problem framing. Just say what to compute (e.g. 'Find the acid dissociation constant given [A-], [H+], and [HA].'). Define each known variable with a name, a realistic range (min and max), units, and number of significant figures. Specify which variable the learner must solve for. Do not name or provide the equation." + TITLE_HINT;
 
 const SOLVE_EQUATION_TOOL = {
   name: "solve_equation",
-  description: "Return a problem template with a scenario, known variables with ranges, a target variable, and a formula for internal validation.",
+  description: "Return a problem template with a problem statement, known variables with ranges, a target variable, and a formula for internal validation.",
   input_schema: {
     type: "object" as const,
     properties: {
-      scenario: { type: "string" as const, description: "Problem description. Do not mention the equation name or formula." },
+      problem: { type: "string" as const, description: "Direct problem statement. No narrator or word-problem framing. Do not mention the equation name or formula." },
       knowns: {
         type: "array" as const,
         items: {
@@ -41,7 +41,7 @@ const SOLVE_EQUATION_TOOL = {
         description: "JavaScript expression using ONLY the known variable symbols that computes the target value. E.g. 'm * a' when solving for F. Use Math.sqrt(), Math.pow(), Math.PI, Math.log() for advanced operations. Not shown to learner.",
       },
     },
-    required: ["scenario", "knowns", "target", "formula"],
+    required: ["problem", "knowns", "target", "formula"],
   },
 };
 
@@ -62,7 +62,7 @@ export interface SolveEquationTarget {
 }
 
 export interface SolveEquationResult {
-  scenario: string;
+  problem: string;
   knowns: SolveEquationKnown[];
   target: SolveEquationTarget;
   formula: string;
@@ -77,7 +77,7 @@ export async function generateSolveEquation(
     apiKey, model, SOLVE_EQUATION_PROMPT, content, SOLVE_EQUATION_TOOL, 600,
   );
   return {
-    scenario: r.scenario ?? "",
+    problem: r.problem ?? "",
     knowns: r.knowns ?? [],
     target: r.target ?? { name: "", symbol: "", units: "", sigfigs: 3 },
     formula: r.formula ?? "",
@@ -97,7 +97,9 @@ export function encodeSolveEquation(se: SolveEquationResult): { question: string
 export function decodeSolveEquation(question: string, answer: string): SolveEquationResult {
   let parsed: Record<string, unknown>;
   try { parsed = JSON.parse(question); } catch { throw new Error("Invalid solve-equation JSON"); }
-  return { ...parsed, formula: answer } as SolveEquationResult;
+  const problem = (parsed.problem ?? parsed.scenario ?? "") as string;
+  const { scenario: _legacy, ...rest } = parsed as Record<string, unknown>;
+  return { ...rest, problem, formula: answer } as SolveEquationResult;
 }
 
 /** Round a number to N significant figures. */

@@ -1,5 +1,8 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type IrisCardsPlugin from "./main";
+import { collectCardLogs, countSamples, optimizeFSRS } from "./fsrs-optimizer";
+import { setFSRSWeights } from "./leitner";
+import { fetchVoices, type ElevenLabsVoice } from "./api/elevenlabs";
 
 export type BadgePosition = "top-right" | "top-left" | "bottom-right" | "bottom-left" | "off";
 
@@ -21,6 +24,17 @@ export interface IrisCardsSettings {
   flashFeedback: boolean;
   badgePosition: BadgePosition;
   desiredRetention: number;
+  // Audio review
+  elevenLabsApiKey: string;
+  elevenLabsVoiceId: string;
+  audioAutoAdvanceMs: number;
+  audioSilenceMs: number;
+  // FSRS optimizer — null means use the built-in defaults.
+  fsrsWeights: number[] | null;
+  fsrsFitLoss: number | null;
+  fsrsFitBaselineLoss: number | null;
+  fsrsFitDate: string | null;
+  fsrsFitSamples: number | null;
   // Internal
   hotkeysConfigured: boolean;
 }
@@ -40,8 +54,19 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   flashFeedback: true,
   badgePosition: "bottom-left",
   desiredRetention: 0.9,
+  elevenLabsApiKey: "",
+  elevenLabsVoiceId: "",
+  audioAutoAdvanceMs: 2000,
+  audioSilenceMs: 1500,
+  fsrsWeights: null,
+  fsrsFitLoss: null,
+  fsrsFitBaselineLoss: null,
+  fsrsFitDate: null,
+  fsrsFitSamples: null,
   hotkeysConfigured: false,
 };
+
+export const FSRS_MIN_SAMPLES = 500;
 
 export class IrisCardsSettingTab extends PluginSettingTab {
   plugin: IrisCardsPlugin;
@@ -119,5 +144,145 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         .addOption("claude-haiku-4-5-20251001", "Claude Haiku 4.5")
         .setValue(s.claudeModel).onChange(async (v) => { s.claudeModel = v; await save(); }));
 
+    // ─── Audio review ────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Audio review" });
+
+    new Setting(containerEl).setName("ElevenLabs API key").setDesc("API key for text-to-speech and speech-to-text.").addText(t => {
+      t.inputEl.type = "password";
+      t.setPlaceholder("xi-...").setValue(s.elevenLabsApiKey).onChange(async (v) => { s.elevenLabsApiKey = v.trim(); await save(); });
+    });
+
+    {
+      const voiceSetting = new Setting(containerEl).setName("Voice").setDesc("ElevenLabs voice for reading questions.");
+      let cachedVoices: ElevenLabsVoice[] | null = null;
+      voiceSetting.addDropdown(d => {
+        if (s.elevenLabsVoiceId) {
+          d.addOption(s.elevenLabsVoiceId, s.elevenLabsVoiceId);
+        }
+        d.setValue(s.elevenLabsVoiceId);
+        d.onChange(async (v) => { s.elevenLabsVoiceId = v; await save(); });
+        d.selectEl.addEventListener("focus", async () => {
+          if (cachedVoices) return;
+          const relay = (this.plugin.app as any).irisRelay;
+          const useRelay = relay?.isElevenLabsConfigured?.();
+          if (!useRelay && !s.elevenLabsApiKey) return;
+          try {
+            const voices: ElevenLabsVoice[] = useRelay
+              ? await relay.elevenLabsVoices()
+              : await fetchVoices(s.elevenLabsApiKey);
+            cachedVoices = voices;
+            const current = d.getValue();
+            d.selectEl.empty();
+            d.addOption("", "— select —");
+            for (const v of voices) d.addOption(v.voice_id, v.name);
+            d.setValue(current);
+          } catch {
+            new Notice("Failed to load ElevenLabs voices. Check your API key.");
+          }
+        }, { once: true });
+      });
+    }
+
+    new Setting(containerEl).setName("Auto-advance delay").setDesc("Milliseconds to wait after feedback before showing the next card.").addSlider(sl =>
+      sl.setLimits(1000, 5000, 500).setValue(s.audioAutoAdvanceMs).setDynamicTooltip().onChange(async (v) => { s.audioAutoAdvanceMs = v; await save(); }));
+
+    new Setting(containerEl).setName("Silence threshold").setDesc("Milliseconds of silence before recording stops automatically.").addSlider(sl =>
+      sl.setLimits(1000, 3000, 250).setValue(s.audioSilenceMs).setDynamicTooltip().onChange(async (v) => { s.audioSilenceMs = v; await save(); }));
+
+    // ─── FSRS optimizer ─────────────────────────────────────
+    containerEl.createEl("h3", { text: "FSRS scheduler" });
+    this.renderFSRSStatus(containerEl);
+
+  }
+
+  private renderFSRSStatus(containerEl: HTMLElement): void {
+    const s = this.plugin.settings;
+    const save = () => this.plugin.saveSettings();
+
+    const statusEl = containerEl.createDiv({ cls: "iris-fsrs-status" });
+    const renderStatus = () => {
+      statusEl.empty();
+      const lines: string[] = [];
+      if (s.fsrsWeights) {
+        const date = s.fsrsFitDate ? new Date(s.fsrsFitDate).toLocaleString() : "?";
+        const loss = s.fsrsFitLoss != null ? s.fsrsFitLoss.toFixed(5) : "?";
+        const base = s.fsrsFitBaselineLoss != null ? s.fsrsFitBaselineLoss.toFixed(5) : "?";
+        const n = s.fsrsFitSamples ?? "?";
+        lines.push(`Using fitted weights — fit on ${n} samples on ${date}.`);
+        lines.push(`Loss: ${loss} (default-weights baseline: ${base}).`);
+      } else {
+        lines.push("Using built-in default FSRS-6 weights.");
+      }
+      for (const line of lines) statusEl.createDiv({ text: line });
+    };
+    renderStatus();
+
+    let abortController: AbortController | null = null;
+
+    const setting = new Setting(containerEl)
+      .setName("Optimize FSRS weights")
+      .setDesc(`Fit per-user FSRS weights from your review log via CMA-ES. Needs ≥${FSRS_MIN_SAMPLES} reviews after a card's first.`);
+
+    setting.addButton(b => {
+      b.setButtonText("Optimize")
+        .onClick(async () => {
+          if (abortController) {
+            abortController.abort();
+            return;
+          }
+          const cards = collectCardLogs(this.plugin.app, s.cardsFolder);
+          const samples = countSamples(cards);
+          if (samples < FSRS_MIN_SAMPLES) {
+            new Notice(`Not enough review data: ${samples}/${FSRS_MIN_SAMPLES} samples.`);
+            return;
+          }
+          abortController = new AbortController();
+          b.setButtonText("Stop");
+          new Notice(`Fitting on ${samples} samples — this may take a minute.`);
+          try {
+            const result = await optimizeFSRS(cards, {
+              signal: abortController.signal,
+              onProgress: (gen, bestF) => {
+                b.setButtonText(`Stop (gen ${gen}, loss ${bestF.toFixed(5)})`);
+              },
+            });
+            if (result.stopped === "aborted") {
+              new Notice("Optimization aborted.");
+              return;
+            }
+            s.fsrsWeights = result.weights;
+            s.fsrsFitLoss = result.loss;
+            s.fsrsFitBaselineLoss = result.baselineLoss;
+            s.fsrsFitDate = new Date().toISOString();
+            s.fsrsFitSamples = result.samples;
+            await save();
+            setFSRSWeights(result.weights);
+            this.plugin.updateBadge();
+            new Notice(`Fit complete — loss ${result.loss.toFixed(5)} vs baseline ${result.baselineLoss.toFixed(5)}.`);
+            renderStatus();
+          } catch (e) {
+            console.error("[iris-cards] FSRS optimize failed", e);
+            new Notice("FSRS optimization failed — see console.");
+          } finally {
+            abortController = null;
+            b.setButtonText("Optimize");
+          }
+        });
+    });
+
+    setting.addButton(b => {
+      b.setButtonText("Reset to defaults")
+        .onClick(async () => {
+          s.fsrsWeights = null;
+          s.fsrsFitLoss = null;
+          s.fsrsFitBaselineLoss = null;
+          s.fsrsFitDate = null;
+          s.fsrsFitSamples = null;
+          await save();
+          setFSRSWeights(null);
+          this.plugin.updateBadge();
+          renderStatus();
+        });
+    });
   }
 }

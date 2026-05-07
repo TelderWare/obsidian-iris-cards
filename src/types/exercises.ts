@@ -3,10 +3,12 @@ export const EXERCISE_TYPES = [
   "Multiple Choice",
   "Cloze",
   "True/False",
+  "List",
   "Solve Equation",
   "Assemble Equation",
   "Place in Order",
   "Correct the Mistake",
+  "Image Occlusion",
 ] as const;
 
 export type ExerciseType = (typeof EXERCISE_TYPES)[number];
@@ -17,6 +19,7 @@ export const TYPE_PRIORITY: ExerciseType[] = [
   "Multiple Choice",
   "Cloze",
   "True/False",
+  "List",
   "Correct the Mistake",
   "Place in Order",
   "Assemble Equation",
@@ -28,6 +31,7 @@ export interface QAVariant {
   question: string;
   answer: string;
   acceptedAnswers: string[];
+  knownIncorrect: string[];
   lastReviewed: string | null;
   suspended: boolean;
   recordMs: number | null;

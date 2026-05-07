@@ -1,18 +1,23 @@
 import {
+  Notice,
   Plugin,
   TFile,
+  TFolder,
   WorkspaceLeaf,
 } from "obsidian";
-import { IrisCardsSettingTab, DEFAULT_SETTINGS } from "./settings";
+import { IrisCardsSettingTab, DEFAULT_SETTINGS, FSRS_MIN_SAMPLES } from "./settings";
 import type { IrisCardsSettings } from "./settings";
 import { ReviewView, VIEW_TYPE_REVIEW } from "./review/review-view";
-import { countDueFromCache } from "./leitner";
+import { countDueFromCache, getParentNoteName, setFSRSWeights } from "./leitner";
+import { collectCardLogs, countSamples, optimizeFSRS } from "./fsrs-optimizer";
 import { CardStore } from "./card-store";
 import { type QAVariant } from "./types/exercises";
 import { setRelayApp } from "./api/client";
 import { encryptSecret, decryptSecret } from "./commands/utils";
 import { PregenManager } from "./commands/pregeneration";
-import { createNoteFromSelection, memorizeSelection } from "./commands/note-creation";
+import { createNoteFromSelection, memorizeSelection, createImageOcclusionCard } from "./commands/note-creation";
+import { buildIrisCardsHomepageWidgets } from "./widgets/homepage-widget";
+import { syncFlashcardTask } from "./tasks-bridge";
 
 const HOTKEYS_PATH = ".obsidian/hotkeys.json";
 
@@ -55,7 +60,39 @@ export default class IrisCardsPlugin extends Plugin {
       callback: () => this.activateReviewView(),
     });
 
-    this.ribbonIconEl = this.addRibbonIcon("brain", "Iris Cards", () => {
+    this.addCommand({
+      id: "review-note-cards",
+      name: "Review cards from this note",
+      checkCallback: (checking: boolean) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return false;
+        const folder = this.app.vault.getAbstractFileByPath(this.settings.cardsFolder.trim() || "Iris Cards");
+        if (!folder || !(folder instanceof TFolder)) return false;
+        const noteName = file.basename;
+        const hasCards = folder.children.some(c => {
+          if (!(c instanceof TFile) || c.extension !== "md") return false;
+          const fm = this.app.metadataCache.getFileCache(c)?.frontmatter;
+          return getParentNoteName(fm) === noteName;
+        });
+        if (!hasCards) return false;
+        if (!checking) this.activateNoteReview(noteName);
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "create-image-occlusion-card",
+      name: "Create image occlusion card",
+      callback: () => createImageOcclusionCard(this),
+    });
+
+    this.addCommand({
+      id: "optimize-fsrs-weights",
+      name: "Optimize FSRS scheduler weights",
+      callback: () => this.optimizeFSRSWeights(),
+    });
+
+    this.ribbonIconEl = this.addRibbonIcon("loader", "Iris Cards", () => {
       this.activateReviewView();
     });
     this.ribbonIconEl.addClass("iris-ribbon-icon");
@@ -129,6 +166,46 @@ export default class IrisCardsPlugin extends Plugin {
     }
   }
 
+  fsrsOptimizing = false;
+
+  async optimizeFSRSWeights(): Promise<void> {
+    if (this.fsrsOptimizing) {
+      new Notice("FSRS optimization already in progress.");
+      return;
+    }
+    const cards = collectCardLogs(this.app, this.settings.cardsFolder);
+    const samples = countSamples(cards);
+    if (samples < FSRS_MIN_SAMPLES) {
+      new Notice(`Not enough review data: ${samples}/${FSRS_MIN_SAMPLES} samples.`);
+      return;
+    }
+    this.fsrsOptimizing = true;
+    const notice = new Notice(`Fitting FSRS weights on ${samples} samples…`, 0);
+    try {
+      const result = await optimizeFSRS(cards, {
+        onProgress: (gen, bestF) => {
+          notice.setMessage(`Fitting FSRS weights — gen ${gen}, loss ${bestF.toFixed(5)}`);
+        },
+      });
+      this.settings.fsrsWeights = result.weights;
+      this.settings.fsrsFitLoss = result.loss;
+      this.settings.fsrsFitBaselineLoss = result.baselineLoss;
+      this.settings.fsrsFitDate = new Date().toISOString();
+      this.settings.fsrsFitSamples = result.samples;
+      await this.saveSettings();
+      setFSRSWeights(result.weights);
+      this.updateBadge();
+      notice.hide();
+      new Notice(`FSRS fit complete — loss ${result.loss.toFixed(5)} vs baseline ${result.baselineLoss.toFixed(5)}.`, 8000);
+    } catch (e) {
+      console.error("[iris-cards] FSRS optimize failed", e);
+      notice.hide();
+      new Notice("FSRS optimization failed — see console.");
+    } finally {
+      this.fsrsOptimizing = false;
+    }
+  }
+
   onunload(): void {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_REVIEW);
   }
@@ -140,12 +217,19 @@ export default class IrisCardsPlugin extends Plugin {
     if (this.settings.anthropicApiKey) {
       this.settings.anthropicApiKey = decryptSecret(this.settings.anthropicApiKey);
     }
+    if (this.settings.elevenLabsApiKey) {
+      this.settings.elevenLabsApiKey = decryptSecret(this.settings.elevenLabsApiKey);
+    }
+    setFSRSWeights(this.settings.fsrsWeights);
   }
 
   async saveSettings(): Promise<void> {
     const toSave = { ...this.settings };
     if (toSave.anthropicApiKey && !toSave.anthropicApiKey.startsWith("enc:")) {
       toSave.anthropicApiKey = encryptSecret(toSave.anthropicApiKey);
+    }
+    if (toSave.elevenLabsApiKey && !toSave.elevenLabsApiKey.startsWith("enc:")) {
+      toSave.elevenLabsApiKey = encryptSecret(toSave.elevenLabsApiKey);
     }
     await this.saveData(toSave);
   }
@@ -155,10 +239,14 @@ export default class IrisCardsPlugin extends Plugin {
     await this.saveSettings();
   }
 
-  updateBadge(): void {
-    if (!this.ribbonIconEl) return;
+  updateBadge(knownCount?: number): void {
     const pos = this.settings.badgePosition;
-    const count = countDueFromCache(this.app, this.settings.cardsFolder, 0, this.settings.desiredRetention);
+    // Callers that just updated the queue (e.g. the homepage widget after
+    // recordReview) pass their in-memory count and let us skip the folder
+    // scan. Without a hint we fall back to recomputing from the metadata cache.
+    const count = knownCount ?? countDueFromCache(this.app, this.settings.cardsFolder, 0, this.settings.desiredRetention);
+    syncFlashcardTask(this.app, count);
+    if (!this.ribbonIconEl) return;
     if (pos !== "off" && count > 0) {
       if (!this.badgeEl) {
         this.badgeEl = this.ribbonIconEl.createSpan({ cls: "iris-badge" });
@@ -171,15 +259,28 @@ export default class IrisCardsPlugin extends Plugin {
     }
   }
 
+  irisHomepageWidgets() {
+    return buildIrisCardsHomepageWidgets(this);
+  }
+
   async activateReviewView(): Promise<{ reused: boolean }> {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_REVIEW);
     if (existing.length > 0) {
       this.app.workspace.revealLeaf(existing[0]);
       return { reused: true };
     }
-    const leaf = this.app.workspace.getLeaf("tab");
+    const leaf = this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: VIEW_TYPE_REVIEW, active: true });
     this.app.workspace.revealLeaf(leaf);
     return { reused: false };
+  }
+
+  async activateNoteReview(noteName: string): Promise<void> {
+    await this.activateReviewView();
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_REVIEW)[0];
+    if (!leaf) return;
+    const view = leaf.view as ReviewView;
+    view.infiniteMode = true;
+    await view.setNoteFilter(noteName);
   }
 }

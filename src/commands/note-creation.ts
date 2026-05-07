@@ -1,6 +1,11 @@
-import { Editor, MarkdownView, MarkdownFileInfo, TFile, TFolder, Notice, normalizePath } from "obsidian";
+import { Editor, MarkdownView, MarkdownFileInfo, SuggestModal, TFile, TFolder, Notice, normalizePath } from "obsidian";
 import { toTitleCase, stripMarkdown, sanitizeFileName } from "./utils";
 import type IrisCardsPlugin from "../main";
+import { ImageOcclusionEditor } from "../widgets/image-occlusion-editor";
+import { encodeImageOcclusion, extractImagePath, type OcclusionRegion } from "../types/image-occlusion";
+import { buildQABlock } from "../types/qa-block";
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 
 function buildContextLine(plugin: IrisCardsPlugin, sourceFile: TFile, editor: Editor): string {
   const cache = plugin.app.metadataCache.getFileCache(sourceFile);
@@ -168,4 +173,89 @@ export async function memorizeSelection(
     plugin.updateBadge();
   });
   new Notice("Saved as card.");
+}
+
+// ─── Image Occlusion ────────────────────────────────────────────────
+
+class ImageSuggestModal extends SuggestModal<TFile> {
+  private files: TFile[];
+  constructor(plugin: IrisCardsPlugin, private onPick: (file: TFile) => void) {
+    super(plugin.app);
+    this.files = plugin.app.vault.getFiles().filter(f => IMAGE_EXTS.has(f.extension.toLowerCase()));
+    this.setPlaceholder("Pick an image…");
+  }
+  getSuggestions(query: string): TFile[] {
+    const q = query.toLowerCase();
+    return this.files.filter(f => f.path.toLowerCase().includes(q)).slice(0, 50);
+  }
+  renderSuggestion(file: TFile, el: HTMLElement): void {
+    el.createDiv({ text: file.name });
+    el.createDiv({ text: file.path, cls: "iris-suggest-path" });
+  }
+  onChooseSuggestion(file: TFile): void {
+    this.onPick(file);
+  }
+}
+
+function findImageInSelection(plugin: IrisCardsPlugin, editor: Editor, ctxFile: TFile | null): TFile | null {
+  const sel = editor.getSelection().trim();
+  const path = extractImagePath(sel);
+  if (!path) return null;
+  return plugin.app.metadataCache.getFirstLinkpathDest(path, ctxFile?.path ?? "");
+}
+
+async function openOcclusionEditorForImage(
+  plugin: IrisCardsPlugin,
+  imageFile: TFile,
+  source?: { file: TFile; module?: string; date?: string },
+): Promise<void> {
+  const onSave = async (regions: OcclusionRegion[]) => {
+    const cardsFolder = plugin.settings.cardsFolder.trim() || "Iris Cards";
+    const { question, answer } = encodeImageOcclusion(`![[${imageFile.path}]]`, regions);
+    const variant = {
+      exerciseType: "Image Occlusion" as const,
+      question, answer,
+      acceptedAnswers: [], knownIncorrect: [],
+      lastReviewed: null, suspended: false, recordMs: null, difficulty: null,
+    };
+    const body = `![[${imageFile.path}]]`;
+    const newFile = await plugin.cardStore.createCard(cardsFolder, body, source);
+    await plugin.app.vault.process(newFile, (content) => content + buildQABlock([variant]));
+    plugin.qaCache.delete(newFile.path);
+
+    const ref = plugin.app.metadataCache.on("resolved", () => {
+      plugin.app.metadataCache.offref(ref);
+      plugin.updateBadge();
+    });
+    new Notice(`Image occlusion card created (${regions.length} regions).`);
+  };
+
+  new ImageOcclusionEditor(plugin.app, plugin, imageFile, [], onSave).open();
+}
+
+export async function createImageOcclusionCard(plugin: IrisCardsPlugin): Promise<void> {
+  // 1) Active file is an image → use it directly
+  const activeFile = plugin.app.workspace.getActiveFile();
+  if (activeFile && IMAGE_EXTS.has(activeFile.extension.toLowerCase())) {
+    return openOcclusionEditorForImage(plugin, activeFile);
+  }
+
+  // 2) Markdown editor with an image embed selected → use that
+  const mdView = plugin.app.workspace.getActiveViewOfType(MarkdownView);
+  if (mdView) {
+    const found = findImageInSelection(plugin, mdView.editor, mdView.file);
+    if (found) {
+      const srcFm = mdView.file ? plugin.app.metadataCache.getFileCache(mdView.file)?.frontmatter : undefined;
+      return openOcclusionEditorForImage(plugin, found, mdView.file ? {
+        file: mdView.file,
+        module: srcFm?.["module"] ?? undefined,
+        date: srcFm?.["date"] ?? undefined,
+      } : undefined);
+    }
+  }
+
+  // 3) Fall back to file picker
+  new ImageSuggestModal(plugin, (file) => {
+    void openOcclusionEditorForImage(plugin, file);
+  }).open();
 }
