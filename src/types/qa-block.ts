@@ -1,4 +1,5 @@
 import { EXERCISE_TYPES, type ExerciseType, type QAVariant, type ParsedQA } from "./exercises";
+import { encodeGapAlt, decodeGapAlt } from "./gap-alternates";
 
 export function parseQABlock(fullContent: string): ParsedQA {
   const noFm = fullContent.replace(/^---[\s\S]*?---\n*/, "");
@@ -25,12 +26,18 @@ export function parseQABlock(fullContent: string): ParsedQA {
   let suspended = false;
   let recordMs: number | null = null;
   let difficulty: number | null = null;
+  let gapDifficulties: Record<string, number> | undefined;
 
   const exerciseSet = new Set<string>(EXERCISE_TYPES);
   const LEGACY_ALIASES: Record<string, ExerciseType> = { "Order Steps": "Place in Order" };
 
+  // Types whose entire payload lives in Q — no A: line is stored. Cloze encodes
+  // gap terms as *stars*; paired True/False holds both statements; Pairs and
+  // Multi-step store their sides/steps as readable `name::`/`Q1::` lines in Q.
+  const NO_ANSWER_TYPES = new Set<ExerciseType>(["Cloze", "True/False", "Word", "Pairs", "Multi-step"]);
+
   const pushVariant = () => {
-    if (q && a) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, knownIncorrect: incorrect, lastReviewed: reviewed, suspended, recordMs, difficulty });
+    if (q && (a || NO_ANSWER_TYPES.has(type))) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, knownIncorrect: incorrect, lastReviewed: reviewed, suspended, recordMs, difficulty, gapDifficulties });
   };
 
   for (const line of lines) {
@@ -47,6 +54,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
       suspended = false;
       recordMs = null;
       difficulty = null;
+      gapDifficulties = undefined;
     } else if (line.startsWith("A: ")) {
       a = line.slice(3).trim();
     } else if (line.startsWith("Type: ")) {
@@ -67,6 +75,14 @@ export function parseQABlock(fullContent: string): ParsedQA {
     } else if (line.startsWith("Difficulty: ")) {
       const val = parseFloat(line.slice(12).trim());
       if (!isNaN(val)) difficulty = val;
+    } else if (line.startsWith("Gap difficulty: ")) {
+      const map: Record<string, number> = {};
+      for (const part of line.slice(16).split(" | ")) {
+        const d = decodeGapAlt(part.trim());
+        const val = parseFloat(d.alt);
+        if (d.term && isFinite(val)) map[d.term] = val;
+      }
+      if (Object.keys(map).length > 0) gapDifficulties = map;
     } else if (q && !a && line.length > 0) {
       // Continuation of a multi-line question (e.g. MC options)
       q += "\n" + line;
@@ -109,6 +125,9 @@ function mergeVariants(a: QAVariant, b: QAVariant): QAVariant {
   const recordMs = primary.recordMs != null && secondary.recordMs != null
     ? Math.min(primary.recordMs, secondary.recordMs)
     : primary.recordMs ?? secondary.recordMs;
+  const gapDifficulties = primary.gapDifficulties || secondary.gapDifficulties
+    ? { ...secondary.gapDifficulties, ...primary.gapDifficulties }
+    : undefined;
   return {
     exerciseType: primary.exerciseType,
     question: primary.question,
@@ -119,13 +138,23 @@ function mergeVariants(a: QAVariant, b: QAVariant): QAVariant {
     suspended: primary.suspended || secondary.suspended,
     recordMs,
     difficulty: primary.difficulty ?? secondary.difficulty,
+    gapDifficulties,
   };
 }
 
 export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[] = []): string {
   if (variants.length === 0 && eligibleTypes.length === 0) return "";
   const entries = variants.map(v => {
-    let entry = `Q: ${v.question}\nA: ${v.answer}`;
+    // Cloze has no separate answer — the *starred* gap terms in Q are the answers.
+    // Paired True/False, Pairs, and Multi-step keep their whole payload in Q
+    // (as readable multi-line encodings).
+    const omitAnswer = v.exerciseType === "Cloze"
+      || v.exerciseType === "Pairs"
+      || v.exerciseType === "Multi-step"
+      || ((v.exerciseType === "True/False" || v.exerciseType === "Word") && !v.answer);
+    let entry = omitAnswer
+      ? `Q: ${v.question}`
+      : `Q: ${v.question}\nA: ${v.answer}`;
     if (v.exerciseType !== "Q&A") {
       entry += `\nType: ${v.exerciseType}`;
     }
@@ -146,6 +175,11 @@ export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[
     }
     if (v.difficulty != null) {
       entry += `\nDifficulty: ${v.difficulty}`;
+    }
+    if (v.gapDifficulties && Object.keys(v.gapDifficulties).length > 0) {
+      const parts = Object.entries(v.gapDifficulties)
+        .map(([term, d]) => encodeGapAlt(term, String(Math.round(d * 100) / 100)));
+      entry += `\nGap difficulty: ${parts.join(" | ")}`;
     }
     return entry;
   });

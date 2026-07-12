@@ -1,23 +1,12 @@
 import { type QAVariant } from "../types/exercises";
-import { decodeTFPair } from "../generators/true-false";
-import { parseClozeTerms, occludeCloze } from "../generators/cloze";
-import { decodeList } from "../generators/list";
 
 /**
- * Exercise types currently supported in audio review mode.
- * Other types (Multiple Choice, Solve Equation, Place in Order, Assemble Equation,
- * Image Occlusion) are auto-skipped by review-view in audio mode.
+ * Audio review handles basic Q&A only. Other exercise types are visual or
+ * interaction-heavy; the standalone audio process (audio-view.ts) simply
+ * skips cards that have no active Q&A variant.
  */
-const AUDIO_SUPPORTED: ReadonlySet<QAVariant["exerciseType"]> = new Set([
-  "Q&A",
-  "Correct the Mistake",
-  "True/False",
-  "Cloze",
-  "List",
-]);
-
 export function isAudioSupported(exerciseType: QAVariant["exerciseType"]): boolean {
-  return AUDIO_SUPPORTED.has(exerciseType);
+  return exerciseType === "Q&A";
 }
 
 function stripMarkdownForSpeech(md: string): string {
@@ -42,53 +31,23 @@ function stripMarkdownForSpeech(md: string): string {
     .trim();
 }
 
-/**
- * Extract speakable question text from a QAVariant.
- * Returns null for exercise types that cannot be presented in audio (Image Occlusion).
- */
-export function questionTextForAudio(
-  variant: QAVariant,
-  renderState: Record<string, unknown>,
-): string | null {
-  const q = variant.question;
-  const a = variant.answer;
-
+/** Speakable question text; null for anything but Q&A. */
+export function questionTextForAudio(variant: QAVariant): string | null {
   if (!isAudioSupported(variant.exerciseType)) return null;
+  return stripMarkdownForSpeech(variant.question);
+}
 
-  switch (variant.exerciseType) {
-    case "Q&A":
-      return stripMarkdownForSpeech(q);
-
-    case "Correct the Mistake":
-      return `Identify and correct the mistake in this statement. ${stripMarkdownForSpeech(q)}`;
-
-    case "True/False": {
-      const tf = decodeTFPair(q, a);
-      if (!tf) return `True or false? ${stripMarkdownForSpeech(q)}`;
-      const pick = (renderState.tfPick as boolean | undefined) ?? Math.random() < 0.5;
-      if (renderState.tfPick === undefined) renderState.tfPick = pick;
-      const statement = pick ? tf.trueStatement : tf.falseStatement;
-      return `True or false? ${stripMarkdownForSpeech(statement)}`;
-    }
-
-    case "Cloze": {
-      const terms = parseClozeTerms(q);
-      if (terms.length === 0) return stripMarkdownForSpeech(q);
-      const idx = (renderState.clozeIdx as number | undefined) ?? Math.floor(Math.random() * terms.length);
-      if (renderState.clozeIdx === undefined) renderState.clozeIdx = idx;
-      const { display } = occludeCloze(q, idx);
-      return stripMarkdownForSpeech(display).replace(/\[\.{3}\]/g, "blank");
-    }
-
-    case "List": {
-      const l = decodeList(q, a);
-      if (!l) return stripMarkdownForSpeech(q);
-      return `${stripMarkdownForSpeech(l.prompt)}. Name all ${l.items.length} items.`;
-    }
-
-    default:
-      return null;
-  }
+/**
+ * Keyterms to bias STT for this variant. Scribe is strong at generic English
+ * but mangles uncommon vocabulary (Greek roots, drug names, biochem terms)
+ * unless told to expect them. The canonical answer plus accepted alternates is
+ * usually enough to flip recognition from "play" to "pleo".
+ *
+ * Returned raw — `sanitizeKeyterms` in api/elevenlabs handles dedupe, char
+ * stripping, and length caps so callers don't have to repeat that logic.
+ */
+export function keytermsForAudio(variant: QAVariant): string[] {
+  return [variant.answer, ...variant.acceptedAnswers];
 }
 
 export function answerTextForAudio(variant: QAVariant): string {

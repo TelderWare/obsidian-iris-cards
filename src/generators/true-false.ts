@@ -56,7 +56,13 @@ export async function generateTrueFalseInverse(
   const answer = r.answer === "False" ? "False" : "True";
   // Validate the inverse actually flipped the truth value
   if (answer === originalAnswer) throw new Error("Inverse did not flip truth value");
-  return { statement: r.statement ?? "", answer };
+  const statement = r.statement ?? "";
+  // An "inverse" that repeats the original verbatim makes the pair
+  // unanswerable — the shown statement would be identical either way.
+  if (statement.trim().toLowerCase() === original.trim().toLowerCase()) {
+    throw new Error("Inverse statement is identical to the original");
+  }
+  return { statement, answer };
 }
 
 // ─── Paired encoding ───────────────────────────────────────────────────
@@ -64,12 +70,11 @@ export async function generateTrueFalseInverse(
 export function encodeTFPair(trueStatement: string, falseStatement: string): { question: string; answer: string } {
   return {
     question: `TRUE: ${trueStatement}\nFALSE: ${falseStatement}`,
-    answer: "Paired",
+    answer: "",
   };
 }
 
-export function decodeTFPair(question: string, answer: string): { trueStatement: string; falseStatement: string } | null {
-  if (answer !== "Paired") return null;
+export function decodeTFPair(question: string): { trueStatement: string; falseStatement: string } | null {
   const idx = question.indexOf("\nFALSE: ");
   if (idx === -1 || !question.startsWith("TRUE: ")) return null;
   return { trueStatement: question.slice(6, idx), falseStatement: question.slice(idx + 8) };

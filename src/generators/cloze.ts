@@ -25,22 +25,36 @@ export async function generateCloze(
   return r.sentence;
 }
 
-/** Extract all *starred* terms from a cloze sentence. */
+/**
+ * A gap is wrapped in *asterisks*. Pipes inside the asterisks denote per-gap
+ * alternates, with the first entry as canonical: `*pleo|poly*` means "pleo" is
+ * shown when revealed but either "pleo" or "poly" is accepted as a guess.
+ */
+function splitGap(raw: string): string[] {
+  return raw.split("|").map(s => s.trim()).filter(Boolean);
+}
+
+/** Canonical (first) term of each gap. Use this for counting and indexing gaps. */
 export function parseClozeTerms(sentence: string): string[] {
   const matches = sentence.match(/\*([^*]+)\*/g);
   if (!matches) return [];
-  return matches.map(m => m.slice(1, -1));
+  return matches.map(m => splitGap(m.slice(1, -1))[0] ?? "");
 }
 
-/** Replace the nth *starred* term with a blank placeholder. */
-export function occludeCloze(sentence: string, index: number): { display: string; answer: string } {
-  const terms = parseClozeTerms(sentence);
-  if (index < 0 || index >= terms.length) throw new Error("Cloze index out of range");
-  const answer = terms[index];
+/**
+ * Replace the nth gap with a blank placeholder; other gaps collapse to their
+ * canonical term. Returns the canonical answer and any per-gap alternates.
+ */
+export function occludeCloze(sentence: string, index: number): { display: string; answer: string; alternates: string[] } {
+  const matches = sentence.match(/\*([^*]+)\*/g);
+  if (!matches || index < 0 || index >= matches.length) throw new Error("Cloze index out of range");
+  const accepted = splitGap(matches[index].slice(1, -1));
+  const answer = accepted[0] ?? "";
   let i = 0;
-  const display = sentence.replace(/\*([^*]+)\*/g, (_, term) => {
-    if (i++ === index) return "___";
-    return term;
+  const display = sentence.replace(/\*([^*]+)\*/g, (_, raw) => {
+    const isTarget = i++ === index;
+    if (isTarget) return "___";
+    return splitGap(raw)[0] ?? "";
   });
-  return { display, answer };
+  return { display, answer, alternates: accepted.slice(1) };
 }

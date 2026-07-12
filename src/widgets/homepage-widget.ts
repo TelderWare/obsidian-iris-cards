@@ -1,8 +1,10 @@
 import { type App, Component, Menu, TFile, type EventRef } from "obsidian";
 import type IrisCardsPlugin from "../main";
-import { getDueCards } from "../leitner";
+import { getDueCards, getParentNoteName } from "../scheduler";
+import { llmMarkingEnabled } from "../ai";
 import type { ParsedQA, QAVariant } from "../types/exercises";
 import {
+  type AnswerFn,
   type RenderContext,
   getParsedCached,
   invalidateParsedCache,
@@ -28,8 +30,8 @@ interface IrisHomepageWidgetDescriptor {
   create(ctx: IrisHomepageContext): IrisHomepageWidgetHandle;
 }
 
-function pickVariant(variants: QAVariant[]): QAVariant | null {
-  const active = variants.filter(v => !v.suspended);
+function pickVariant(variants: QAVariant[], plugin: IrisCardsPlugin): QAVariant | null {
+  const active = variants.filter(v => !v.suspended && (llmMarkingEnabled(plugin) || v.exerciseType !== "List"));
   if (active.length === 0) return null;
   const qa = active.find(v => v.exerciseType === "Q&A");
   return qa ?? active[0];
@@ -43,15 +45,28 @@ function pickVariant(variants: QAVariant[]): QAVariant | null {
  */
 class WidgetRenderContext extends Component implements RenderContext {
   peekedAnswer = false;
+  infiniteMode = false;
   private renderStates = new Map<string, Record<string, unknown>>();
   private audioCtx: AudioContext | null = null;
 
   constructor(
     readonly app: App,
     readonly plugin: IrisCardsPlugin,
-    private readonly flashHost: HTMLElement,
+    private flashHost: HTMLElement,
   ) {
     super();
+  }
+
+  /**
+   * Re-point flash feedback at the element it should cover. The widget root
+   * stacks a "Review" header above the card, so flashing the root puts the top
+   * edge-glow up in the header — the colour then only reads as entering from the
+   * sides and bottom. The caller points this at a non-scrolling wrapper sized to
+   * the card, so the glow hugs all four card edges (as in the full review view)
+   * and stays put while the card scrolls.
+   */
+  setFlashHost(host: HTMLElement): void {
+    this.flashHost = host;
   }
 
   getRenderState(cardFile: TFile, variant: QAVariant): Record<string, unknown> {
@@ -85,9 +100,9 @@ class WidgetRenderContext extends Component implements RenderContext {
   }
 
   /**
-   * Oscillator-based tones. Self-contained (no WAV data-URL dependency), so the
-   * widget works even if the full review view's audio assets aren't loaded.
-   * Correct: short high chirp. Incorrect: low square-wave buzz.
+   * Oscillator-based tones, matched note-for-note to the full review view
+   * (ReviewView.playChime / playBuzz) so the widget sounds identical.
+   * Correct: two-note rising chime. Incorrect: low square-wave buzz.
    */
   private playTone(correct: boolean): void {
     try {
@@ -98,17 +113,32 @@ class WidgetRenderContext extends Component implements RenderContext {
       }
       const ctx = this.audioCtx;
       const now = ctx.currentTime;
-      const dur = correct ? 0.08 : 0.12;
-      const osc = ctx.createOscillator();
-      osc.type = correct ? "sine" : "square";
-      osc.frequency.value = correct ? 880 : 220;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(correct ? 0.2 : 0.25, now + 0.005);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + dur);
+      if (correct) {
+        for (const [freq, onset, dur] of [[523.25, 0, 0.12], [783.99, 0.06, 0.18]] as const) {
+          const osc = ctx.createOscillator();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(0.0001, now + onset);
+          g.gain.exponentialRampToValueAtTime(0.18, now + onset + 0.008);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + onset + dur);
+          osc.connect(g).connect(ctx.destination);
+          osc.start(now + onset);
+          osc.stop(now + onset + dur);
+        }
+      } else {
+        const dur = 0.12;
+        const osc = ctx.createOscillator();
+        osc.type = "square";
+        osc.frequency.value = 220;
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.25, now + 0.005);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + dur);
+      }
     } catch { /* ignore */ }
   }
 }
@@ -177,6 +207,13 @@ class ReviewWidget {
     this.selfWrittenPaths.set(path, Date.now() + SELF_WRITE_TTL_MS);
   }
 
+  /** Same module filter the badge and review view apply, so the widget queue
+   *  matches the badge count. undefined when no filter is active. */
+  private moduleFilter(): Set<string> | undefined {
+    const mf = this.plugin.settings.reviewModuleFilter;
+    return mf.length > 0 ? new Set(mf) : undefined;
+  }
+
   private scheduleReload(): void {
     if (this.reloadTimer != null) window.clearTimeout(this.reloadTimer);
     this.reloadTimer = window.setTimeout(() => {
@@ -197,7 +234,7 @@ class ReviewWidget {
       this.plugin.app,
       this.plugin.settings.cardsFolder,
       0,
-      undefined,
+      this.moduleFilter(),
       this.plugin.settings.desiredRetention,
     );
     this.nextPrefetch = null;
@@ -232,7 +269,7 @@ class ReviewWidget {
         this.plugin.app,
         this.plugin.settings.cardsFolder,
         0,
-        undefined,
+        this.moduleFilter(),
         this.plugin.settings.desiredRetention,
       );
       this.nextPrefetch = null;
@@ -251,7 +288,7 @@ class ReviewWidget {
             : await getParsedCached(this.plugin.app, file).catch(() => null);
         this.nextPrefetch = null;
         if (!parsed) { this.dueCards.shift(); continue; }
-        const variant = pickVariant(parsed.variants);
+        const variant = pickVariant(parsed.variants, this.plugin);
         if (variant) {
           this.currentCard = file;
           this.currentVariant = variant;
@@ -283,7 +320,12 @@ class ReviewWidget {
     this.root.empty();
     this.root.createEl("h6", { cls: "iris-hp-widget-title", text: "Review" });
 
-    this.cardEl = this.root.createDiv({ cls: "iris-card iris-widget-card" });
+    // The card itself scrolls (overflow-y: auto). Flash a non-scrolling wrapper
+    // around it instead: the glow then hugs all four card edges, stays put as
+    // the card scrolls, and doesn't bleed up into the "Review" header above.
+    const cardWrap = this.root.createDiv({ cls: "iris-widget-cardwrap" });
+    this.cardEl = cardWrap.createDiv({ cls: "iris-card iris-widget-card" });
+    this.renderCtx.setFlashHost(cardWrap);
     await renderVariantInto(
       this.renderCtx,
       this.cardEl,
@@ -298,20 +340,22 @@ class ReviewWidget {
    * createAnswerHandler: feedback + recordReview + advance, with a re-entrancy
    * guard so double-clicks can't record the same card twice.
    */
-  private makeAnswerFn(file: TFile, variant: QAVariant) {
-    return async (correct: boolean, userAnswer?: string, gapTerm?: string) => {
+  private makeAnswerFn(file: TFile, variant: QAVariant): AnswerFn {
+    const fn = (async (correct: boolean, userAnswer?: string, gapTerm?: string, grade?: number) => {
       if (this.answering) return;
       this.answering = true;
 
       const elapsedMs = Math.round(performance.now() - this.startedAt);
-      const record = correct && variant.recordMs != null && elapsedMs < variant.recordMs;
-      this.renderCtx.playFeedback(correct, record);
+
+      // Feedback (sound + flash) is fired by the renderers at the moment of
+      // rating — exactly as in the full review view, whose rateCard also does
+      // not replay it. Calling it again here would double the sound/flash.
 
       // Suppress the metadata-cache "changed" event this write will fire —
       // our dueCards and badge are already up to date without a rescan.
       this.markSelfWrite(file.path);
       try {
-        await this.plugin.cardStore.recordReview(file, correct, variant.question, userAnswer, elapsedMs, gapTerm);
+        await this.plugin.cardStore.recordReview(file, correct, variant.question, userAnswer, elapsedMs, gapTerm, grade, this.plugin.settings.cardsFolder, this.plugin.settings.desiredRetention, this.plugin.settings.scheduler);
       } catch (err) {
         console.error("[iris-cards] Widget: recordReview failed", err);
       }
@@ -321,13 +365,32 @@ class ReviewWidget {
       invalidateParsedCache(file.path);
 
       this.dueCards.shift();
-      // We know the exact new due count — skip the folder scan updateBadge
-      // would otherwise do.
+      this.burySiblings(file);
       this.plugin.updateBadge(this.dueCards.length);
 
       this.answering = false;
       await this.advance();
-    };
+    }) as AnswerFn;
+    return fn;
+  }
+
+  private burySiblings(reviewedFile: TFile): void {
+    const cache = this.plugin.app.metadataCache.getFileCache(reviewedFile);
+    const parentNote = getParentNoteName(cache?.frontmatter);
+    if (!parentNote) return;
+    const others: TFile[] = [];
+    const siblings: TFile[] = [];
+    for (const card of this.dueCards) {
+      const fm = this.plugin.app.metadataCache.getFileCache(card)?.frontmatter;
+      if (getParentNoteName(fm) === parentNote) {
+        siblings.push(card);
+      } else {
+        others.push(card);
+      }
+    }
+    if (siblings.length > 0 && others.length > 0) {
+      this.dueCards = [...others, ...siblings];
+    }
   }
 
   private setHidden(hidden: boolean): void {
@@ -364,7 +427,7 @@ class ReviewWidget {
 
     toggle("soundFeedback", "Sound feedback", "volume-2");
     toggle("flashFeedback", "Flash feedback", "zap");
-    toggle("autoMark", "AI marking", "brain-circuit");
+    if (s.aiFeatures) toggle("autoMark", "AI marking", "brain-circuit");
 
     menu.showAtMouseEvent(e);
   }

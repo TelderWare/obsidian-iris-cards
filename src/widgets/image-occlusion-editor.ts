@@ -91,9 +91,17 @@ export class ImageOcclusionEditor extends Modal {
       this.updateStatus();
     }
 
-    this.overlayEl.addEventListener("mousedown", (e) => this.onStageMouseDown(e));
+    this.overlayEl.addEventListener("mousedown", (e) => this.onStagePointerDown(e.clientX, e.clientY, e.target as HTMLElement, () => e.preventDefault()));
+    this.overlayEl.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      this.onStagePointerDown(t.clientX, t.clientY, t.target as HTMLElement, () => {});
+    }, { passive: false });
     window.addEventListener("mousemove", this.onMouseMove);
     window.addEventListener("mouseup", this.onMouseUp);
+    window.addEventListener("touchmove", this.onTouchMove, { passive: false });
+    window.addEventListener("touchend", this.onMouseUp);
     window.addEventListener("keydown", this.onKeyDown);
 
     const footer = contentEl.createDiv({ cls: "iris-occlusion-editor-footer" });
@@ -122,6 +130,8 @@ export class ImageOcclusionEditor extends Modal {
   onClose(): void {
     window.removeEventListener("mousemove", this.onMouseMove);
     window.removeEventListener("mouseup", this.onMouseUp);
+    window.removeEventListener("touchmove", this.onTouchMove);
+    window.removeEventListener("touchend", this.onMouseUp);
     window.removeEventListener("keydown", this.onKeyDown);
     this.contentEl.empty();
   }
@@ -192,6 +202,7 @@ export class ImageOcclusionEditor extends Modal {
           this.updateStatus();
         });
         input.addEventListener("mousedown", (e) => e.stopPropagation());
+        input.addEventListener("touchstart", (e) => e.stopPropagation());
         input.addEventListener("click", (e) => e.stopPropagation());
         input.addEventListener("keydown", (e) => e.stopPropagation());
         // Auto-focus newly drawn or AI-suggested empty labels
@@ -203,6 +214,7 @@ export class ImageOcclusionEditor extends Modal {
         });
         setIcon(delBtn, "x");
         delBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+        delBtn.addEventListener("touchstart", (e) => e.stopPropagation());
         delBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           this.regions = this.regions.filter(reg => reg.key !== r.key);
@@ -239,19 +251,18 @@ export class ImageOcclusionEditor extends Modal {
     return { x, y, w, h, label: r.label };
   }
 
-  private onStageMouseDown(e: MouseEvent): void {
-    const target = e.target as HTMLElement;
+  private onStagePointerDown(clientX: number, clientY: number, target: HTMLElement, preventDefault: () => void): void {
 
     // Resize handle
     if (target.hasClass("iris-occlusion-editor-handle")) {
       const key = Number(target.dataset.key);
       const region = this.regions.find(r => r.key === key);
       if (!region) return;
-      e.preventDefault();
+      preventDefault();
       this.dragMode = "resize";
       this.dragKey = key;
       this.dragOriginal = { ...region };
-      this.dragStart = this.displayToNatural(e.clientX, e.clientY);
+      this.dragStart = this.displayToNatural(clientX, clientY);
       return;
     }
 
@@ -261,21 +272,21 @@ export class ImageOcclusionEditor extends Modal {
       const key = Number(boxEl.dataset.key);
       const region = this.regions.find(r => r.key === key);
       if (!region) return;
-      e.preventDefault();
+      preventDefault();
       const wasSelected = this.selectedKey === key;
       this.selectedKey = key;
       if (!wasSelected) this.renderRegions();
       this.dragMode = "move";
       this.dragKey = key;
       this.dragOriginal = { ...region };
-      this.dragStart = this.displayToNatural(e.clientX, e.clientY);
+      this.dragStart = this.displayToNatural(clientX, clientY);
       return;
     }
 
     // Empty area → start drawing
     if (this.natural.width === 0) return;
-    e.preventDefault();
-    const start = this.displayToNatural(e.clientX, e.clientY);
+    preventDefault();
+    const start = this.displayToNatural(clientX, clientY);
     const region: EditorRegion = {
       key: this.nextKey++,
       x: start.x, y: start.y, w: 1, h: 1, label: "",
@@ -325,6 +336,13 @@ export class ImageOcclusionEditor extends Modal {
       boxEl.style.width = `${(region.w / this.natural.width) * 100}%`;
       boxEl.style.height = `${(region.h / this.natural.height) * 100}%`;
     }
+  };
+
+  private onTouchMove = (e: TouchEvent): void => {
+    if (this.dragMode === null || e.touches.length !== 1) return;
+    e.preventDefault();
+    const t = e.touches[0];
+    this.onMouseMove({ clientX: t.clientX, clientY: t.clientY } as MouseEvent);
   };
 
   private onMouseUp = (): void => {

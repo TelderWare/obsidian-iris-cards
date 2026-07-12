@@ -1,7 +1,8 @@
 import { TFile } from "obsidian";
-import { TYPE_PRIORITY, type QAVariant, type ExerciseType } from "../types/exercises";
+import { type QAVariant, type ExerciseType } from "../types/exercises";
 import { parseQABlock } from "../types/qa-block";
-import { setRelayPriority, hasRelay } from "../api/client";
+import { setRelayPriority } from "../api/client";
+import { aiEnabled } from "../ai";
 import { standardizeQuestion, reframeQuestion } from "../api/qc";
 import {
   classifyEligibility,
@@ -14,8 +15,11 @@ import {
   generateCorrectMistake,
   generateTrueFalse, generateTrueFalseInverse, encodeTFPair,
   generateAssembleEquation, encodeAssembleEquation,
+  generateSynonym,
+  generateRank, encodeRank,
+  generateWord,
 } from "../generators";
-import { getDueCards } from "../leitner";
+import { getDueCards } from "../scheduler";
 import type IrisCardsPlugin from "../main";
 
 interface PregenEntry {
@@ -23,6 +27,14 @@ interface PregenEntry {
   priority: number;
   resolve: (v: QAVariant[]) => void;
 }
+
+/** Types the AI can generate. Hand-authored types (Pairs, Multi-step, Image
+ * Occlusion) are never auto-generated even if listed as eligible. */
+const GENERATABLE_TYPES: ReadonlySet<ExerciseType> = new Set([
+  "Q&A", "Multiple Choice", "Cloze", "Solve Equation", "Place in Order",
+  "List", "Correct the Mistake", "True/False", "Assemble Equation",
+  "Synonym", "Rank", "Word",
+]);
 
 export class PregenManager {
   private pregenQueue: PregenEntry[] = [];
@@ -58,8 +70,8 @@ export class PregenManager {
   }
 
   async pregenerateAll(): Promise<void> {
+    if (!aiEnabled(this.plugin)) return;
     const apiKey = this.plugin.settings.anthropicApiKey;
-    if (!apiKey && !hasRelay()) return;
     const cards = await getDueCards(this.plugin.app, this.plugin.settings.cardsFolder, 0, undefined, this.plugin.settings.desiredRetention);
     for (const card of cards) {
       this.enqueuePregen(card, 0);
@@ -68,6 +80,7 @@ export class PregenManager {
   }
 
   pregenerateQA(card: TFile, apiKey: string, priority = 1): void {
+    if (!aiEnabled(this.plugin)) return;
     this.enqueuePregen(card, priority);
     this.drainPregenQueue(apiKey);
   }
@@ -108,8 +121,9 @@ export class PregenManager {
           const hasUnreviewed = active.some(v => v.lastReviewed === null);
 
           const coveredTypes = new Set(variants.map(v => v.exerciseType));
-          const prioritized = TYPE_PRIORITY.filter(t => eligible.includes(t));
-          const candidates = prioritized.filter(t => !coveredTypes.has(t));
+          // Uniform random pick over eligible uncovered types — no ordering
+          // bias in which exercise type a card grows next.
+          const candidates = eligible.filter(t => GENERATABLE_TYPES.has(t) && !coveredTypes.has(t));
           const nextType = !hasUnreviewed && candidates.length > 0
             ? candidates[Math.floor(Math.random() * candidates.length)]
             : undefined;
@@ -174,7 +188,7 @@ export class PregenManager {
         return variants;
       },
       "Multiple Choice": async () => { const e = encodeMC(await generateMultipleChoice(body, apiKey, model)); return [make(e.question, e.answer)]; },
-      "Cloze": async () => { const s = await generateCloze(body, apiKey, model); return [make(s, s)]; },
+      "Cloze": async () => { const s = await generateCloze(body, apiKey, model); return [make(s, "")]; },
       "Solve Equation": async () => { const e = encodeSolveEquation(await generateSolveEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "Place in Order": async () => { const e = encodeOrderSteps(await generateOrderSteps(body, apiKey, model)); return [make(e.question, e.answer)]; },
       "List": async () => { const e = encodeList(await generateList(body, apiKey, model)); return [make(e.question, e.answer)]; },
@@ -190,6 +204,9 @@ export class PregenManager {
         } catch { return [make(r.statement, r.answer)]; }
       },
       "Assemble Equation": async () => { const e = encodeAssembleEquation(await generateAssembleEquation(body, apiKey, model)); return [make(e.question, e.answer)]; },
+      "Synonym": async () => { const r = await generateSynonym(body, apiKey, model); return [make(r.question, r.answer)]; },
+      "Rank": async () => { const e = encodeRank(await generateRank(body, apiKey, model)); return [make(e.question, e.answer)]; },
+      "Word": async () => { const r = await generateWord(body, apiKey, model); return [make(r.source, r.acronym)]; },
     };
 
     const gen = generators[type];

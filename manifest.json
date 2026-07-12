@@ -1,9 +1,9 @@
 {
   "id": "iris-cards",
   "name": "Iris Cards",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "minAppVersion": "1.4.0",
-  "description": "Spaced repetition with auto-generated exercises (Q&A, multiple choice, cloze, equations, and more) plus quick note creation from selections.",
+  "description": "Spaced repetition flashcards — write your own cards across many exercise types (Q&A, cloze, pairs, multi-step, and more), with optional AI generation and marking.",
   "author": "mgodd",
   "isDesktopOnly": false
 }

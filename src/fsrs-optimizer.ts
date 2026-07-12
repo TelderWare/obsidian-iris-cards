@@ -1,8 +1,8 @@
 import { App, TFile, TFolder } from "obsidian";
-import { FSRS_DEFAULT_WEIGHTS, parseReviewLog, type ParsedLogEntry } from "./leitner";
+import { FSRS_DEFAULT_WEIGHTS, parseReviewLog, type ParsedLogEntry } from "./scheduler";
 
 // Self-contained parameterized FSRS replay so optimization doesn't have to
-// mutate the active weights in leitner.ts mid-run (which would race with the
+// mutate the active weights in scheduler.ts mid-run (which would race with the
 // rest of the plugin reading them).
 
 const DECAY = -0.5;
@@ -11,10 +11,26 @@ const S_MIN = 0.1;
 const S_MAX = 36500;
 const D_MIN = 1;
 const D_MAX = 10;
-const GRADE_CORRECT = 3;
-const GRADE_WRONG = 1;
+const GRADE_AGAIN = 1;
+const GRADE_HARD  = 2;
+const GRADE_GOOD  = 3;
+const GRADE_EASY  = 4;
 const MS_PER_DAY = 86400000;
 const EPS = 1e-7;
+
+// Per-parameter clamp ranges from the official FSRS optimizer
+// (open-spaced-repetition/fsrs-optimizer). Without these, poorly-identified
+// parameters drift out of their semantic range — e.g. an Easy bonus (w16)
+// below 1 turns Easy into a stability *penalty* and mature-card intervals
+// collapse instead of growing.
+const PARAM_BOUNDS: readonly [number, number][] = [
+  [0.01, 100], [0.01, 100], [0.01, 100], [0.01, 100], // w0-w3  initial stability per grade
+  [1, 10], [0.1, 5],                                   // w4-w5  initial difficulty
+  [0.1, 5], [0, 0.75],                                 // w6-w7  difficulty update
+  [0, 4.5], [0, 0.8], [0.01, 3.5],                     // w8-w10 recall stability growth
+  [0.1, 5], [0.01, 0.25], [0.01, 0.9], [0.01, 4],      // w11-w14 lapse stability
+  [0, 1], [1, 6],                                      // w15-w16 Hard penalty / Easy bonus
+];
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -28,29 +44,39 @@ function initDFromGrade(W: ArrayLike<number>, grade: number): number {
   return clamp(W[4] - Math.exp(W[5] * (grade - 1)) + 1, D_MIN, D_MAX);
 }
 
-function initS(W: ArrayLike<number>, correct: boolean): number {
-  return clamp(W[correct ? GRADE_CORRECT - 1 : GRADE_WRONG - 1], S_MIN, S_MAX);
+function gradeFor(entry: ParsedLogEntry): number {
+  if (entry.grade != null) return entry.grade;
+  return entry.correct ? GRADE_GOOD : GRADE_AGAIN;
 }
 
-function initD(W: ArrayLike<number>, correct: boolean): number {
-  return initDFromGrade(W, correct ? GRADE_CORRECT : GRADE_WRONG);
+function initS(W: ArrayLike<number>, correct: boolean, grade?: number): number {
+  const g = grade ?? (correct ? GRADE_GOOD : GRADE_AGAIN);
+  return clamp(W[g - 1], S_MIN, S_MAX);
 }
 
-function updS(W: ArrayLike<number>, S: number, D: number, correct: boolean, R: number): number {
+function initD(W: ArrayLike<number>, correct: boolean, grade?: number): number {
+  return initDFromGrade(W, grade ?? (correct ? GRADE_GOOD : GRADE_AGAIN));
+}
+
+function updS(W: ArrayLike<number>, S: number, D: number, correct: boolean, R: number, grade?: number): number {
   const s = clamp(S, S_MIN, S_MAX);
   const d = clamp(D, D_MIN, D_MAX);
   const r = clamp(R, 0.001, 0.999);
   if (correct) {
     const growth = Math.exp(W[8]) * (11 - d) * Math.pow(s, -W[9]) * (Math.exp(W[10] * (1 - r)) - 1);
-    return clamp(s * (1 + growth), S_MIN, S_MAX);
+    let newS = s * (1 + growth);
+    const g = grade ?? GRADE_GOOD;
+    if (g === GRADE_HARD) newS *= W[15];
+    if (g === GRADE_EASY) newS *= W[16];
+    return clamp(newS, S_MIN, S_MAX);
   }
   const lapsed = W[11] * Math.pow(d, -W[12]) * (Math.pow(s + 1, W[13]) - 1) * Math.exp(W[14] * (1 - r));
   return clamp(Math.min(lapsed, s), S_MIN, S_MAX);
 }
 
-function updD(W: ArrayLike<number>, D: number, correct: boolean): number {
+function updD(W: ArrayLike<number>, D: number, correct: boolean, grade?: number): number {
   const d = clamp(D, D_MIN, D_MAX);
-  const g = correct ? GRADE_CORRECT : GRADE_WRONG;
+  const g = grade ?? (correct ? GRADE_GOOD : GRADE_AGAIN);
   const deltaD = -W[6] * (g - 3);
   const damped = d + (deltaD * (10 - d)) / 9;
   const target = initDFromGrade(W, 4);
@@ -70,18 +96,20 @@ export function meanLogLoss(W: ArrayLike<number>, cards: CardLog[]): number {
   for (const card of cards) {
     if (card.entries.length < 2) continue;
     const e0 = card.entries[0];
-    let S = initS(W, e0.correct);
-    let D = initD(W, e0.correct);
+    const g0 = gradeFor(e0);
+    let S = initS(W, e0.correct, g0);
+    let D = initD(W, e0.correct, g0);
     let prevT = e0.timestamp;
     for (let i = 1; i < card.entries.length; i++) {
       const e = card.entries[i];
+      const g = gradeFor(e);
       const elapsed = Math.max(0, (e.timestamp - prevT) / MS_PER_DAY);
       const R = clamp(retrievability(elapsed, S), EPS, 1 - EPS);
       const y = e.correct ? 1 : 0;
       loss += -(y * Math.log(R) + (1 - y) * Math.log(1 - R));
       samples++;
-      S = updS(W, S, D, e.correct, R);
-      D = updD(W, D, e.correct);
+      S = updS(W, S, D, e.correct, R, g);
+      D = updD(W, D, e.correct, g);
       prevT = e.timestamp;
     }
   }
@@ -274,8 +302,11 @@ export async function optimizeFSRS(
   let B = identity(dim);
   let DvecStability = new Array(dim).fill(1);
 
-  // toW: transform from log-space x to W vector (strict positivity).
-  const toW = (x: number[]): number[] => x.map(xi => Math.exp(xi));
+  // toW: transform from log-space x to W vector (strict positivity), then
+  // clamp into the official per-parameter bounds. Clamping here covers both
+  // candidate evaluation and the returned best weights.
+  const toW = (x: number[]): number[] =>
+    x.map((xi, i) => clamp(Math.exp(xi), PARAM_BOUNDS[i][0], PARAM_BOUNDS[i][1]));
 
   let bestX = m.slice();
   let bestF = meanLogLoss(toW(m), cards);

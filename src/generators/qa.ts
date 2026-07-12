@@ -1,4 +1,5 @@
 import { callClaudeTool, getRelay, TITLE_HINT } from "../api/client";
+import { type MarkResult, marked, markFailed } from "../types/marking";
 
 const SYSTEM_PROMPT =
   "You are a flashcard generator. Given some information, generate exactly one question and one concise answer that tests recall. Name the specific subject in the question to anchor it. The answer must not be extractable from the question." + TITLE_HINT;
@@ -58,6 +59,9 @@ export async function generateVariant(
 const JUDGE_PROMPT =
   "You are a flashcard reviewer. Given a question, the correct answer, and the user's answer, judge whether the user's answer is factually correct. Be lenient with phrasing and synonyms, but strict on factual accuracy — a wrong fact is wrong even if it sounds similar. For example, 'the hunt' and 'hunting' are the same concept (correct), but 'Ares' is not 'Artemis' (incorrect).";
 
+const OPEN_JUDGE_PROMPT =
+  "You are a flashcard reviewer. The user was given a statement containing a factual mistake and asked to correct it. Judge whether the user's corrected version is factually accurate. There may be multiple valid ways to fix the mistake — accept any correction that produces a true statement. Be lenient with phrasing and synonyms, but strict on factual accuracy.";
+
 const JUDGE_TOOL = {
   name: "judgment",
   description: "Return whether the user's answer is correct.",
@@ -81,39 +85,56 @@ const NLI_CONTRADICTION_GUARD = 0.5;
 
 export async function markAnswer(
   question: string,
-  correctAnswer: string,
+  correctAnswer: string | undefined,
   userAnswer: string,
   apiKey: string,
   model: string,
-): Promise<boolean> {
-  // Prefer HF cross-encoder NLI when available. Marking is latency-critical
-  // (user is waiting after typing an answer) and the task is textbook NLI:
-  // does one answer entail the other? We check both directions to be lenient
-  // on partial answers and verbose answers alike, but flag any direction that
-  // looks like an outright contradiction.
-  const relay = getRelay();
-  if (relay?.isHFConfigured?.() && correctAnswer && userAnswer) {
-    try {
-      const [forward, backward] = await Promise.all([
-        relay.nli(userAnswer, correctAnswer, { callerId: "iris-cards:mark" }),
-        relay.nli(correctAnswer, userAnswer, { callerId: "iris-cards:mark" }),
-      ]);
-      const contradiction = Math.max(forward.contradiction, backward.contradiction);
-      if (contradiction > NLI_CONTRADICTION_GUARD) return false;
-      const entailment = Math.max(forward.entailment, backward.entailment);
-      return entailment > NLI_ENTAILMENT_THRESHOLD;
-    } catch (err) {
-      console.warn("iris-cards: HF NLI marking failed; falling back to Claude", err);
-      // fall through
+): Promise<MarkResult<boolean>> {
+  try {
+    // When no canonical answer is provided (e.g. Correct the Mistake), skip NLI
+    // and go straight to Claude with an open-ended factual-accuracy prompt.
+    if (!correctAnswer) {
+      const r = await callClaudeTool<{ correct: boolean }>(
+        apiKey, model, OPEN_JUDGE_PROMPT,
+        `Question: ${question}\nUser's answer: ${userAnswer}`,
+        JUDGE_TOOL, 100,
+      );
+      return marked(r.correct ?? false);
     }
-  }
 
-  const r = await callClaudeTool<{ correct: boolean }>(
-    apiKey, model, JUDGE_PROMPT,
-    `Question: ${question}\nCorrect answer: ${correctAnswer}\nUser's answer: ${userAnswer}`,
-    JUDGE_TOOL, 100,
-  );
-  return r.correct ?? false;
+    // Prefer HF cross-encoder NLI when available. Marking is latency-critical
+    // (user is waiting after typing an answer) and the task is textbook NLI:
+    // does one answer entail the other? We check both directions to be lenient
+    // on partial answers and verbose answers alike, but flag any direction that
+    // looks like an outright contradiction.
+    const relay = getRelay();
+    if (relay?.isHFConfigured?.() && userAnswer) {
+      try {
+        const [forward, backward] = await Promise.all([
+          relay.nli(userAnswer, correctAnswer, { callerId: "iris-cards:mark" }),
+          relay.nli(correctAnswer, userAnswer, { callerId: "iris-cards:mark" }),
+        ]);
+        const contradiction = Math.max(forward.contradiction, backward.contradiction);
+        if (contradiction > NLI_CONTRADICTION_GUARD) return marked(false);
+        const entailment = Math.max(forward.entailment, backward.entailment);
+        return marked(entailment > NLI_ENTAILMENT_THRESHOLD);
+      } catch (err) {
+        console.warn("iris-cards: HF NLI marking failed; falling back to Claude", err);
+        // fall through to Claude
+      }
+    }
+
+    const r = await callClaudeTool<{ correct: boolean }>(
+      apiKey, model, JUDGE_PROMPT,
+      `Question: ${question}\nCorrect answer: ${correctAnswer}\nUser's answer: ${userAnswer}`,
+      JUDGE_TOOL, 100,
+    );
+    return marked(r.correct ?? false);
+  } catch (e) {
+    // No backend reachable (keys out / network). Report failure rather than
+    // letting it surface as a wrong answer.
+    return markFailed(e);
+  }
 }
 
 const APPEAL_PROMPT =

@@ -1,22 +1,22 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type IrisCardsPlugin from "./main";
 import { collectCardLogs, countSamples, optimizeFSRS } from "./fsrs-optimizer";
-import { setFSRSWeights } from "./leitner";
+import { setFSRSWeights, LEITNER_INTERVALS } from "./scheduler";
 import { fetchVoices, type ElevenLabsVoice } from "./api/elevenlabs";
 
 export type BadgePosition = "top-right" | "top-left" | "bottom-right" | "bottom-left" | "off";
+export type SchedulerAlgorithm = "fsrs" | "leitner";
 
 export interface IrisCardsSettings {
-  // Note creation (with selection)
-  targetPrefix: string;
-  stripPrefixes: string[];
-  useAutoStripPrefixes: boolean;
-  withSelectionAddParentNote: boolean;
-  // Note creation (no selection)
-  noSelectionUseTargetPrefix: boolean;
-  noSelectionAddParentNote: boolean;
-  // Memorize
+  // Cards
   cardsFolder: string;
+  // Master switch for every AI-backed feature (generation, LLM marking,
+  // classification). Off by default — the plugin works fully AI-independent.
+  aiFeatures: boolean;
+  // Experimental features (currently: audio-only review mode).
+  experimentalMode: boolean;
+  // Scheduling algorithm: FSRS (default) or a standard Leitner box system.
+  scheduler: SchedulerAlgorithm;
   anthropicApiKey: string;
   claudeModel: string;
   autoMark: boolean;
@@ -35,18 +35,24 @@ export interface IrisCardsSettings {
   fsrsFitBaselineLoss: number | null;
   fsrsFitDate: string | null;
   fsrsFitSamples: number | null;
+  // Re-fit weights automatically on load once enough new reviews accumulate.
+  fsrsAutoOptimize: boolean;
+  // Review view — persisted module filter (module codes).
+  reviewModuleFilter: string[];
+  // Review view — persisted exercise-type filter (empty = all types).
+  reviewTypeFilter: string[];
   // Internal
-  hotkeysConfigured: boolean;
+  // Last-used type chip in the card-authoring form, restored on next open.
+  authorLastType: string;
+  hotkeysConfiguredV4: boolean;
+  displayTitleBackfillV1: boolean;
 }
 
 export const DEFAULT_SETTINGS: IrisCardsSettings = {
-  targetPrefix: "Glossary",
-  stripPrefixes: [],
-  useAutoStripPrefixes: true,
-  withSelectionAddParentNote: true,
-  noSelectionUseTargetPrefix: false,
-  noSelectionAddParentNote: false,
   cardsFolder: "Iris Cards",
+  aiFeatures: false,
+  experimentalMode: false,
+  scheduler: "fsrs",
   anthropicApiKey: "",
   claudeModel: "claude-sonnet-4-6",
   autoMark: false,
@@ -63,10 +69,21 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   fsrsFitBaselineLoss: null,
   fsrsFitDate: null,
   fsrsFitSamples: null,
-  hotkeysConfigured: false,
+  fsrsAutoOptimize: true,
+  reviewModuleFilter: [],
+  reviewTypeFilter: [],
+  authorLastType: "qa",
+  hotkeysConfiguredV4: false,
+  displayTitleBackfillV1: false,
 };
 
 export const FSRS_MIN_SAMPLES = 500;
+
+// Auto re-fit only after this many *new* post-first reviews have accumulated
+// since the last fit (or since zero, if never fit). Keeps the on-load refit
+// from running on trivial deltas — and because each fit updates fsrsFitSamples
+// to the current count, it won't re-trigger until another batch accrues.
+export const FSRS_AUTO_REFIT_NEW_SAMPLES = 200;
 
 export class IrisCardsSettingTab extends PluginSettingTab {
   plugin: IrisCardsPlugin;
@@ -93,36 +110,9 @@ export class IrisCardsSettingTab extends PluginSettingTab {
       new Setting(containerEl).setName(name).setDesc(desc).addText(t =>
         t.setPlaceholder(placeholder).setValue(s[key]).onChange(async (v) => { (s as unknown as Record<string, unknown>)[key] = v.trim(); await save(); }));
 
-    // ─── With selection ─────────────────────────────────────
-    containerEl.createEl("h3", { text: "Create note (with selection)" });
-    addText("Target prefix", "Folder prepended to new note paths when creating from selected text.", "targetPrefix", "Glossary");
-    addToggle("Auto-detect strip prefixes", "When enabled, all top-level vault folders are used as strip prefixes. Disable to specify a custom list.", "useAutoStripPrefixes", () => this.display());
-
-    if (!s.useAutoStripPrefixes) {
-      new Setting(containerEl)
-        .setName("Custom strip prefixes")
-        .setDesc("Comma-separated folder names to strip from the start of note paths.")
-        .addText(t => t.setPlaceholder("Projects, Areas, Resources").setValue(s.stripPrefixes.join(", "))
-          .onChange(async (v) => { s.stripPrefixes = v.split(",").map(x => x.trim()).filter(Boolean); await save(); }));
-    }
-
-    addToggle("Add parent note", "Add a parent-note property linking back to the source note.", "withSelectionAddParentNote");
-
-    // ─── Without selection ──────────────────────────────────
-    containerEl.createEl("h3", { text: "Create note (no selection)" });
-    addToggle("Use target prefix folder", "Create untitled notes in the target prefix folder instead of the vault root.", "noSelectionUseTargetPrefix");
-    addToggle("Add parent note", "Add a parent-note property linking back to the source note.", "noSelectionAddParentNote");
-
-    // ─── Memorize ───────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Memorize" });
+    // ─── Cards ──────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Cards" });
     addText("Cards folder", "Folder where Iris Cards are stored.", "cardsFolder", "Iris Cards");
-
-    new Setting(containerEl).setName("Anthropic API key").setDesc("API key for Claude-generated review questions.").addText(t => {
-      t.inputEl.type = "password";
-      t.setPlaceholder("sk-ant-...").setValue(s.anthropicApiKey).onChange(async (v) => { s.anthropicApiKey = v.trim(); await save(); });
-    });
-
-    addToggle("Auto-mark", "Let Claude mark your typed answer instead of self-marking.", "autoMark");
     addToggle("Sound feedback", "Play a chime for correct and a buzz for incorrect.", "soundFeedback");
     addToggle("Flash feedback", "Flash the screen green or red on correct/incorrect.", "flashFeedback");
 
@@ -135,64 +125,99 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         off: "Disabled",
       }).setValue(s.badgePosition).onChange(async (v) => { s.badgePosition = v as BadgePosition; await save(); this.plugin.updateBadge(); }));
 
-    new Setting(containerEl).setName("Desired retention").setDesc("Target probability of remembering a card when it comes due (0.70–0.97). Higher = more frequent reviews.").addSlider(sl =>
-      sl.setLimits(0.70, 0.97, 0.01).setValue(s.desiredRetention).setDynamicTooltip().onChange(async (v) => { s.desiredRetention = v; await save(); this.plugin.updateBadge(); }));
+    // ─── Scheduling ─────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Scheduling" });
 
-    new Setting(containerEl).setName("Claude model").setDesc("Model used for generating review questions.").addDropdown(d =>
-      d.addOption("claude-opus-4-6", "Claude Opus 4.6")
-        .addOption("claude-sonnet-4-6", "Claude Sonnet 4.6")
-        .addOption("claude-haiku-4-5-20251001", "Claude Haiku 4.5")
-        .setValue(s.claudeModel).onChange(async (v) => { s.claudeModel = v; await save(); }));
+    new Setting(containerEl).setName("Algorithm").setDesc("FSRS adapts intervals to your memory model. Leitner is a standard box system: correct moves a card up a box, incorrect sends it back to box 1.").addDropdown(d =>
+      d.addOption("fsrs", "FSRS")
+        .addOption("leitner", "Leitner boxes")
+        .setValue(s.scheduler).onChange(async (v) => {
+          s.scheduler = v as SchedulerAlgorithm;
+          await save();
+          this.plugin.updateBadge();
+          this.display();
+        }));
 
-    // ─── Audio review ────────────────────────────────────────
-    containerEl.createEl("h3", { text: "Audio review" });
+    if (s.scheduler === "fsrs") {
+      new Setting(containerEl).setName("Desired retention").setDesc("Target probability of remembering a card when it comes due (0.70–0.97). Higher = more frequent reviews.").addSlider(sl =>
+        sl.setLimits(0.70, 0.97, 0.01).setValue(s.desiredRetention).setDynamicTooltip().onChange(async (v) => { s.desiredRetention = v; await save(); this.plugin.updateBadge(); }));
 
-    new Setting(containerEl).setName("ElevenLabs API key").setDesc("API key for text-to-speech and speech-to-text.").addText(t => {
-      t.inputEl.type = "password";
-      t.setPlaceholder("xi-...").setValue(s.elevenLabsApiKey).onChange(async (v) => { s.elevenLabsApiKey = v.trim(); await save(); });
-    });
-
-    {
-      const voiceSetting = new Setting(containerEl).setName("Voice").setDesc("ElevenLabs voice for reading questions.");
-      let cachedVoices: ElevenLabsVoice[] | null = null;
-      voiceSetting.addDropdown(d => {
-        if (s.elevenLabsVoiceId) {
-          d.addOption(s.elevenLabsVoiceId, s.elevenLabsVoiceId);
-        }
-        d.setValue(s.elevenLabsVoiceId);
-        d.onChange(async (v) => { s.elevenLabsVoiceId = v; await save(); });
-        d.selectEl.addEventListener("focus", async () => {
-          if (cachedVoices) return;
-          const relay = (this.plugin.app as any).irisRelay;
-          const useRelay = relay?.isElevenLabsConfigured?.();
-          if (!useRelay && !s.elevenLabsApiKey) return;
-          try {
-            const voices: ElevenLabsVoice[] = useRelay
-              ? await relay.elevenLabsVoices()
-              : await fetchVoices(s.elevenLabsApiKey);
-            cachedVoices = voices;
-            const current = d.getValue();
-            d.selectEl.empty();
-            d.addOption("", "— select —");
-            for (const v of voices) d.addOption(v.voice_id, v.name);
-            d.setValue(current);
-          } catch {
-            new Notice("Failed to load ElevenLabs voices. Check your API key.");
-          }
-        }, { once: true });
+      this.renderFSRSStatus(containerEl);
+    } else {
+      containerEl.createDiv({
+        cls: "setting-item-description",
+        text: `Box intervals: ${LEITNER_INTERVALS.join(", ")} days. Cards keep their FSRS history, so you can switch back at any time.`,
       });
     }
 
-    new Setting(containerEl).setName("Auto-advance delay").setDesc("Milliseconds to wait after feedback before showing the next card.").addSlider(sl =>
-      sl.setLimits(1000, 5000, 500).setValue(s.audioAutoAdvanceMs).setDynamicTooltip().onChange(async (v) => { s.audioAutoAdvanceMs = v; await save(); }));
+    // ─── AI features ────────────────────────────────────────
+    containerEl.createEl("h3", { text: "AI features" });
 
-    new Setting(containerEl).setName("Silence threshold").setDesc("Milliseconds of silence before recording stops automatically.").addSlider(sl =>
-      sl.setLimits(1000, 3000, 250).setValue(s.audioSilenceMs).setDynamicTooltip().onChange(async (v) => { s.audioSilenceMs = v; await save(); }));
+    addToggle("Enable AI features", "Generate exercise variants and mark typed answers with Claude. Off by default — everything works without it; you write your own cards.", "aiFeatures", () => this.display());
 
-    // ─── FSRS optimizer ─────────────────────────────────────
-    containerEl.createEl("h3", { text: "FSRS scheduler" });
-    this.renderFSRSStatus(containerEl);
+    if (s.aiFeatures) {
+      new Setting(containerEl).setName("Anthropic API key").setDesc("API key for Claude-generated review questions.").addText(t => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("sk-ant-...").setValue(s.anthropicApiKey).onChange(async (v) => { s.anthropicApiKey = v.trim(); await save(); });
+      });
 
+      new Setting(containerEl).setName("Claude model").setDesc("Model used for generating review questions.").addDropdown(d =>
+        d.addOption("claude-opus-4-6", "Claude Opus 4.6")
+          .addOption("claude-sonnet-4-6", "Claude Sonnet 4.6")
+          .addOption("claude-haiku-4-5-20251001", "Claude Haiku 4.5")
+          .setValue(s.claudeModel).onChange(async (v) => { s.claudeModel = v; await save(); }));
+
+      addToggle("Auto-mark", "Let Claude mark your typed answer instead of self-marking.", "autoMark");
+    }
+
+    // ─── Experimental ───────────────────────────────────────
+    containerEl.createEl("h3", { text: "Experimental" });
+
+    addToggle("Experimental features", "Enable experimental features: audio-only review mode (text-to-speech questions, spoken answers).", "experimentalMode", () => this.display());
+
+    if (s.experimentalMode) {
+      new Setting(containerEl).setName("ElevenLabs API key").setDesc("API key for text-to-speech and speech-to-text.").addText(t => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("xi-...").setValue(s.elevenLabsApiKey).onChange(async (v) => { s.elevenLabsApiKey = v.trim(); await save(); });
+      });
+
+      {
+        const voiceSetting = new Setting(containerEl).setName("Voice").setDesc("ElevenLabs voice for reading questions.");
+        let cachedVoices: ElevenLabsVoice[] | null = null;
+        voiceSetting.addDropdown(d => {
+          if (s.elevenLabsVoiceId) {
+            d.addOption(s.elevenLabsVoiceId, s.elevenLabsVoiceId);
+          }
+          d.setValue(s.elevenLabsVoiceId);
+          d.onChange(async (v) => { s.elevenLabsVoiceId = v; await save(); });
+          d.selectEl.addEventListener("focus", async () => {
+            if (cachedVoices) return;
+            const relay = (this.plugin.app as any).irisRelay;
+            const useRelay = relay?.isElevenLabsConfigured?.();
+            if (!useRelay && !s.elevenLabsApiKey) return;
+            try {
+              const voices: ElevenLabsVoice[] = useRelay
+                ? await relay.elevenLabsVoices({ callerId: "iris-cards:settings" })
+                : await fetchVoices(s.elevenLabsApiKey);
+              cachedVoices = voices;
+              const current = d.getValue();
+              d.selectEl.empty();
+              d.addOption("", "— select —");
+              for (const v of voices) d.addOption(v.voice_id, v.name);
+              d.setValue(current);
+            } catch {
+              new Notice("Failed to load ElevenLabs voices. Check your API key.");
+            }
+          }, { once: true });
+        });
+      }
+
+      new Setting(containerEl).setName("Auto-advance delay").setDesc("Milliseconds to wait after feedback before showing the next card.").addSlider(sl =>
+        sl.setLimits(1000, 5000, 500).setValue(s.audioAutoAdvanceMs).setDynamicTooltip().onChange(async (v) => { s.audioAutoAdvanceMs = v; await save(); }));
+
+      new Setting(containerEl).setName("Silence threshold").setDesc("Milliseconds of silence before recording stops automatically.").addSlider(sl =>
+        sl.setLimits(1000, 3000, 250).setValue(s.audioSilenceMs).setDynamicTooltip().onChange(async (v) => { s.audioSilenceMs = v; await save(); }));
+    }
   }
 
   private renderFSRSStatus(containerEl: HTMLElement): void {
@@ -269,6 +294,12 @@ export class IrisCardsSettingTab extends PluginSettingTab {
           }
         });
     });
+
+    new Setting(containerEl)
+      .setName("Auto-optimize")
+      .setDesc(`Re-fit weights automatically on startup once ${FSRS_AUTO_REFIT_NEW_SAMPLES} new reviews accumulate since the last fit.`)
+      .addToggle(t =>
+        t.setValue(s.fsrsAutoOptimize).onChange(async (v) => { s.fsrsAutoOptimize = v; await save(); }));
 
     setting.addButton(b => {
       b.setButtonText("Reset to defaults")

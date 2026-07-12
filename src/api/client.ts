@@ -38,7 +38,7 @@ function apiHeaders(apiKey: string) {
 async function apiRequest(apiKey: string, body: object, relayPriority?: number): Promise<Record<string, unknown>> {
   // Route through Iris Relay when available
   const relay = (_app as any)?.irisRelay;
-  if (relay) return relay.request(body, relayPriority ?? _relayPriority);
+  if (relay) return relay.request(body, { priority: relayPriority ?? _relayPriority, callerId: "iris-cards:generate" });
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {

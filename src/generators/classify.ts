@@ -38,6 +38,18 @@ A version of the fact with a plausible error introduced; the learner identifies 
 The equation is shown with one term blanked out; the learner fills in the missing piece.
 - Eligible when: the fact contains a named equation or formula with at least two distinct variables or constants.
 - Ineligible when: the fact is purely qualitative, or the equation has only one term.
+### Synonym
+The learner is given a term and asked to provide a well-known synonym or alternate name.
+- Eligible when: the fact contains a term that has a widely accepted synonym, alternate name, or equivalent term in the same field (e.g. epinephrine/adrenaline, Krebs cycle/citric acid cycle).
+- Ineligible when: no term in the fact has a genuine, established alternate name — loose paraphrases or definitions do not count.
+### Rank
+Two items are shown and the learner picks which is more (or less) of some property.
+- Eligible when: the fact ranks or orders 3 or more comparable items along a single property (e.g. stability, electronegativity, acidity, atomic radius, boiling point).
+- Ineligible when: the fact orders fewer than 3 items, the items are not comparable along one property, or the ordering is not actually established by the fact.
+### Word
+A long single word is split into segments and the learner spells one blanked segment at a time.
+- Eligible when: the fact contains a long, multi-part single word worth memorizing letter-by-letter (e.g. a systematic chemical name, complex drug name, or long enzyme/anatomical/taxonomic term) — ideally one with a known acronym or abbreviation.
+- Ineligible when: no single word is long or morphologically segmentable enough to make spelling it a meaningful exercise.
 ## Input
 A single fact.
 ## Output

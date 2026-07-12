@@ -62,15 +62,120 @@ export async function elevenLabsTTS(
   });
 }
 
-export async function elevenLabsSTT(audioBlob: Blob, apiKey: string): Promise<string> {
+/**
+ * Stream TTS as raw PCM. Calls `onSamples` with Float32 chunks as they arrive
+ * so the controller can schedule playback before the full clip is downloaded.
+ * Resolves once the response stream ends.
+ *
+ * Uses fetch() (not Obsidian's requestUrl) because we need ReadableStream
+ * access on the response body — requestUrl buffers the entire response.
+ * Defaults to eleven_flash_v2_5 for ~75 ms time-to-first-byte.
+ */
+export async function elevenLabsTTSStream(
+  text: string,
+  apiKey: string,
+  voiceId: string,
+  onSamples: (samples: Float32Array, sampleRate: number) => void,
+  options?: { modelId?: string; signal?: AbortSignal },
+): Promise<void> {
+  const modelId = options?.modelId ?? "eleven_flash_v2_5";
+  const sampleRate = 22050;
+  const response = await fetch(
+    `${BASE_URL}/text-to-speech/${voiceId}/stream?output_format=pcm_${sampleRate}`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ text, model_id: modelId }),
+      signal: options?.signal,
+    },
+  );
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`ElevenLabs TTS stream ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
+  if (!response.body) throw new Error("ElevenLabs TTS stream returned no body");
+
+  const reader = response.body.getReader();
+  // PCM s16le: 2 bytes per sample. Network chunks can split samples, so we
+  // hold any odd trailing byte over to the next iteration.
+  let leftover: Uint8Array | null = null;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+
+      let chunk: Uint8Array;
+      if (leftover) {
+        chunk = new Uint8Array(leftover.length + value.length);
+        chunk.set(leftover);
+        chunk.set(value, leftover.length);
+        leftover = null;
+      } else {
+        chunk = value;
+      }
+
+      const aligned = chunk.length - (chunk.length % 2);
+      if (aligned < chunk.length) leftover = chunk.slice(aligned);
+      if (aligned === 0) continue;
+
+      const samples = new Float32Array(aligned / 2);
+      const view = new DataView(chunk.buffer, chunk.byteOffset, aligned);
+      for (let i = 0; i < samples.length; i++) {
+        samples[i] = view.getInt16(i * 2, true) / 0x7FFF;
+      }
+      onSamples(samples, sampleRate);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* */ }
+  }
+}
+
+/**
+ * Sanitize keyterms for ElevenLabs Scribe. The realtime endpoint is the
+ * stricter of the two (≤20 chars per term, ≤50 entries); use those limits
+ * everywhere so a single sanitizer covers both paths. Disallowed chars
+ * (`<>{}[]\`) get stripped; empties dropped; entries deduped.
+ */
+export function sanitizeKeyterms(input: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== "string") continue;
+    const cleaned = raw.replace(/[<>{}[\]\\]/g, "").trim();
+    if (!cleaned) continue;
+    const truncated = cleaned.length > 20 ? cleaned.slice(0, 20).trim() : cleaned;
+    const key = truncated.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(truncated);
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
+export async function elevenLabsSTT(
+  audioBlob: Blob,
+  apiKey: string,
+  options?: { keyterms?: readonly string[] },
+): Promise<string> {
   return retryable(async () => {
     const boundary = "----IrisCards" + Date.now().toString(36);
     const audioBytes = new Uint8Array(await audioBlob.arrayBuffer());
 
     const encoder = new TextEncoder();
+    const keyterms = sanitizeKeyterms(options?.keyterms ?? []);
+    // Each keyterm is sent as its own form field with the same name — standard
+    // multipart convention for array params, matches Scribe's `keyterms: array`.
+    const keytermParts = keyterms.map(k =>
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="keyterms"\r\n\r\n${k}\r\n`
+    ).join("");
+
     const preamble = encoder.encode(
       `--${boundary}\r\n` +
       `Content-Disposition: form-data; name="model_id"\r\n\r\nscribe_v2\r\n` +
+      keytermParts +
       `--${boundary}\r\n` +
       `Content-Disposition: form-data; name="file"; filename="recording.webm"\r\n` +
       `Content-Type: audio/webm\r\n\r\n`,

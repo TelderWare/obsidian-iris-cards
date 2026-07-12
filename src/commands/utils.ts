@@ -1,37 +1,21 @@
-const MINOR_WORDS = new Set([
-  "a", "an", "the", "and", "but", "or", "nor", "for", "yet", "so",
-  "in", "on", "at", "to", "by", "of", "up", "as", "is", "if",
-]);
-
-export function toTitleCase(text: string): string {
-  return text
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 0)
-    .map((word, i) => {
-      if (i === 0 || !MINOR_WORDS.has(word)) {
-        return word.charAt(0).toUpperCase() + word.slice(1);
-      }
-      return word;
-    })
-    .join(" ");
-}
-
 export function stripMarkdown(text: string): string {
-  return text
+  // Protect math spans ($$...$$ and $...$) — their _ and * are LaTeX
+  // subscripts/operators, not Markdown emphasis, and must survive stripping.
+  const math: string[] = [];
+  const guarded = text.replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, (m) => {
+    math.push(m);
+    return `\x00${math.length - 1}\x00`;
+  });
+
+  const stripped = guarded
     .replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2") // [[link|display]] → display, [[link]] → link
     .replace(/\*\*(.+?)\*\*/g, "$1")   // **bold**
     .replace(/__(.+?)__/g, "$1")        // __bold__
     .replace(/\*(.+?)\*/g, "$1")        // *italic*
     .replace(/_(.+?)_/g, "$1")          // _italic_
     .replace(/~~(.+?)~~/g, "$1");       // ~~strikethrough~~
-}
 
-export function sanitizeFileName(name: string): string {
-  return name
-    .replace(/[\\/:*?"<>|#^[\]]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return stripped.replace(/\x00(\d+)\x00/g, (_, i) => math[Number(i)]);
 }
 
 export function encryptSecret(key: string): string {
