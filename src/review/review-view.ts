@@ -1124,9 +1124,14 @@ export class ReviewView extends ItemView {
     const body = this.scrollBody!;
     const table = await this.plugin.tableStore.getTable(item.file);
     const row = table?.rows.find(r => r.key === item.rowKey);
+    // Columns to keep out of the quiz: the table's own no-quiz: list, plus the
+    // ordering column when the global "don't quiz a table's ordering column"
+    // setting is on (a sort key like Mass usually isn't worth recalling).
+    const excluded = new Set(table?.noQuiz ?? []);
+    if (this.plugin.settings.noQuizOrderColumn && table?.orderBy) excluded.add(table.orderBy);
     const fields = table && row
       ? table.columns
-        .filter(c => !table.noQuiz.includes(c) && (row.cells[c] ?? "").trim())
+        .filter(c => !excluded.has(c) && (row.cells[c] ?? "").trim())
         .map(c => ({ name: c, content: row.cells[c].trim() }))
       : [];
     if (!table || !row || fields.length < 2) {

@@ -41,6 +41,9 @@ export interface IrisCardsSettings {
   reviewModuleFilter: string[];
   // Review view — persisted exercise-type filter (empty = all types).
   reviewTypeFilter: string[];
+  // Tables — when on, a table's order-by column (a sort key like Mass) is used
+  // only for ordering row introduction, never shown or asked in review.
+  noQuizOrderColumn: boolean;
   // Internal
   // Last-used type chip in the card-authoring form, restored on next open.
   authorLastType: string;
@@ -72,6 +75,7 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   fsrsAutoOptimize: true,
   reviewModuleFilter: [],
   reviewTypeFilter: [],
+  noQuizOrderColumn: true,
   authorLastType: "qa",
   hotkeysConfiguredV4: false,
   displayTitleBackfillV1: false,
@@ -124,6 +128,12 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         "bottom-left": "Bottom left",
         off: "Disabled",
       }).setValue(s.badgePosition).onChange(async (v) => { s.badgePosition = v as BadgePosition; await save(); this.plugin.updateBadge(); }));
+
+    addToggle(
+      "Don't quiz a table's ordering column",
+      "A table's order-by column (a sort key like Mass) sequences how rows are introduced. With this on it's used only for ordering — never shown or asked in review. A table's own no-quiz: still applies on top.",
+      "noQuizOrderColumn",
+    );
 
     // ─── Scheduling ─────────────────────────────────────────
     containerEl.createEl("h3", { text: "Scheduling" });
