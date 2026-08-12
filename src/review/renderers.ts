@@ -13,6 +13,7 @@ import { decodeOrderSteps, shuffleArray } from "../generators/order-steps";
 import { decodeRank } from "../generators/rank";
 import { decodeList, markList } from "../generators/list";
 import { decodePairs, isTypeableContent } from "../generators/pairs";
+import { decodeMatch, markMatch } from "../generators/match";
 import { decodeMultiStep } from "../generators/multi-step";
 import { decodeImageOcclusion } from "../types/image-occlusion";
 import { llmMarkingEnabled } from "../ai";
@@ -129,7 +130,7 @@ export function createAnswerHandler(
 const GRADE_META: Record<number, { label: string; cls: string; key: string }> = {
   [GRADE_AGAIN]: { label: "Again", cls: "iris-rate-again", key: "0" },
   [GRADE_HARD]:  { label: "Hard",  cls: "iris-rate-hard",  key: "1" },
-  [GRADE_GOOD]:  { label: "Good",  cls: "iris-rate-good",  key: "2" },
+  [GRADE_GOOD]:  { label: "Medium", cls: "iris-rate-good", key: "2" },
   [GRADE_EASY]:  { label: "Easy",  cls: "iris-rate-easy",  key: "3" },
 };
 
@@ -265,10 +266,13 @@ class CardController {
   private settled = false;
   private busy = false;
   private readonly t0 = performance.now();
+  /** Unbind for the key listener of whichever action row is currently live. */
+  private keyCleanup: (() => void) | null = null;
 
   constructor(
     private readonly view: RenderContext,
     private readonly card: HTMLElement,
+    private readonly cardFile: TFile,
     private readonly answer: AnswerFn,
     private readonly variant: QAVariant,
     readonly interactive: boolean,
@@ -346,8 +350,82 @@ class CardController {
     if (correct) {
       this.showPostRating(opts.userAnswer, opts.gapTerm);
     } else {
-      await this.answer(false, opts.userAnswer, opts.gapTerm, GRADE_AGAIN);
+      this.showContinue(opts.userAnswer, opts.gapTerm);
     }
+  }
+
+  /**
+   * Post-incorrect: hold the card so the correction can actually be read, then
+   * record Again on an explicit press. A wrong answer used to record and jump
+   * to the next card in the same tick, which left no time to process it. Space
+   * or Enter continues; the button stays for touch.
+   */
+  private showContinue(userAnswer?: string, gapTerm?: string): void {
+    // Take the place of the pre-rendered rating row instead of stacking below
+    // it. Typed-input cards lock the card's height before marking, and the
+    // invisible rating row is still holding its slot — appending a second
+    // actions row pushes this one past the lock, where it spills outside the
+    // scroll body's reach. On a phone that means a wrong answer leaves you
+    // with no reachable Continue button at all.
+    this.card.querySelector(".iris-post-rating")?.remove();
+    const actions = this.card.createDiv({ cls: "iris-actions iris-continue" });
+    const btn = actions.createEl("button", {
+      cls: "iris-rate-btn iris-continue-btn",
+      text: "Continue",
+      attr: { "aria-label": "Continue [space]" },
+    });
+    let pressed = false;
+    const go = (cleanup: () => void) => {
+      if (pressed) return;
+      pressed = true;
+      cleanup();
+      void this.answer(false, userAnswer, gapTerm, GRADE_AGAIN);
+    };
+    const cleanup = this.interactive
+      ? bindCardKeyListener(this.view, (e, done) => {
+          if (e.key !== " " && e.key !== "Enter") return;
+          e.preventDefault();
+          go(done);
+        })
+      : () => {};
+    this.keyCleanup = cleanup;
+    this.on(btn, "click", () => go(cleanup));
+    this.addCheatButton(actions, gapTerm);
+    this.focus(btn);
+    if (this.interactive) scrollActionsIntoView(actions);
+  }
+
+  /**
+   * "Cheated" — the answer came from knowing how questions are phrased, or from
+   * reflex, rather than from recall. Records Again and flags the variant so its
+   * wording is rewritten before it comes round again.
+   *
+   * The typed answer is deliberately not passed on: recording a cheated-correct
+   * string as an accepted answer (or a knee-jerk one as known-incorrect) would
+   * train marking on an answer the learner never really produced.
+   */
+  addCheatButton(container: HTMLElement, gapTerm?: string): void {
+    if (!this.interactive) return;
+    const btn = container.createEl("button", {
+      cls: "iris-cheat-btn",
+      text: "Cheated",
+      attr: { "aria-label": "Cheated or knee-jerk — rephrase this question" },
+    });
+    let pressed = false;
+    this.on(btn, "click", async () => {
+      if (pressed) return;
+      pressed = true;
+      btn.disabled = true;
+      // Drop the row's key bindings so a stray digit can't grade the card that
+      // replaces this one.
+      this.keyCleanup?.();
+      // Flagged before the review is recorded, so the two writes to the card
+      // file are sequenced — and so the intent survives the rewrite failing or
+      // AI being unavailable.
+      await this.view.plugin.cardStore.flagRephrase(this.cardFile, this.variant.question);
+      await this.answer(false, undefined, gapTerm, GRADE_AGAIN);
+      void this.view.plugin.pregen.rephraseVariant(this.cardFile, this.variant.question);
+    });
   }
 
   /**
@@ -380,6 +458,8 @@ class CardController {
     }
     rating.removeClass("iris-pre-rating");
     this.wireGradeButtons(rating, POST_GRADES, (grade) => void this.answer(true, userAnswer, gapTerm, grade));
+    this.addCheatButton(rating, gapTerm);
+    if (this.interactive) scrollActionsIntoView(rating);
   }
 
   /**
@@ -403,6 +483,7 @@ class CardController {
     let clicked = false;
     const pick = (grade: number) => { if (!clicked) { clicked = true; onPick(grade); } };
     const cleanup = this.interactive ? bindRatingKeys(this.view, container, gradeKeyMap(grades), pick) : () => {};
+    this.keyCleanup = cleanup;
     for (const btn of Array.from(container.querySelectorAll<HTMLButtonElement>(".iris-rate-btn"))) {
       this.on(btn, "click", () => {
         if (clicked) return;
@@ -411,6 +492,20 @@ class CardController {
       });
     }
   }
+}
+
+/**
+ * Bring a just-revealed action row into view. On a phone the card is routinely
+ * taller than the pane, so buttons that appear below the answer start off
+ * outside it — the review looks stuck because the only way forward is
+ * off-screen. `nearest` does nothing when the row is already visible, so this
+ * is a no-op on desktop. Deferred a frame so the row has been laid out.
+ *
+ * Note this fires once, after the answer is in — never while typing. Scrolling
+ * mid-composition is what garbled Android input before.
+ */
+function scrollActionsIntoView(el: HTMLElement): void {
+  requestAnimationFrame(() => el.scrollIntoView({ block: "nearest" }));
 }
 
 /** Recover the grade a rating button represents from its colour class. */
@@ -482,11 +577,20 @@ async function renderManualReveal(
   const typedAnswer = () => input?.value.trim() || undefined;
 
   const actions = card.createDiv({ cls: "iris-actions iris-hidden" });
-  controller.renderGradeButtons(actions, SELF_GRADES, (grade) => {
-    const correct = grade !== GRADE_AGAIN;
-    controller.feedback(correct, false);
-    void answer(correct, typedAnswer(), opts.gapTerm, grade);
-  });
+  // Built at reveal time rather than up front, because what to offer depends on
+  // what was typed: a blank answer isn't a recall you can grade, so it gets
+  // Again on its own — Hard/Medium/Easy would be rating a non-answer.
+  const showSelfGrade = () => {
+    const grades = input && !typedAnswer() ? [GRADE_AGAIN] : SELF_GRADES;
+    controller.renderGradeButtons(actions, grades, (grade) => {
+      const correct = grade !== GRADE_AGAIN;
+      controller.feedback(correct, false);
+      void answer(correct, typedAnswer(), opts.gapTerm, grade);
+    });
+    controller.addCheatButton(actions, opts.gapTerm);
+    actions.removeClass("iris-hidden");
+    if (controller.interactive) scrollActionsIntoView(actions);
+  };
 
   let revealed = false;
   const reveal = (showActions = true) => {
@@ -498,15 +602,14 @@ async function renderManualReveal(
     if (!showActions) return;
     if (view.infiniteMode) {
       // Infinite mode auto-advances on every other card type — do the same
-      // here instead of demanding an extra "Next" press. The revealed answer
-      // stays on the answered card above the incoming one.
+      // here instead of demanding an extra "Next" press.
       void answer(true, typedAnswer(), opts.gapTerm, GRADE_GOOD);
     } else if (view.peekedAnswer) {
       const next = card.createDiv({ cls: "iris-actions" });
       const btn = next.createEl("button", { cls: "iris-rate-btn iris-rate-good", text: "Next" });
       controller.on(btn, "click", () => void answer(true, typedAnswer(), opts.gapTerm, GRADE_GOOD));
     } else {
-      actions.removeClass("iris-hidden");
+      showSelfGrade();
     }
   };
 
@@ -530,6 +633,8 @@ async function renderManualReveal(
         controller.renderGradeButtons(rating, POST_GRADES, (grade) => {
           void answer(true, typedAnswer(), opts.gapTerm, grade);
         });
+        controller.addCheatButton(rating, opts.gapTerm);
+        if (controller.interactive) scrollActionsIntoView(rating);
       });
     }
     controller.focusInitial(input);
@@ -569,9 +674,25 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
   }
 
   const inputSection = card.createDiv({ cls: "iris-user-answer" });
-  const attrs: Record<string, string> = {};
+  // Predictive text is actively harmful here: an Android IME that rewrites a
+  // committed word is silently changing the answer being graded, and its
+  // re-commits are a source of scrambled input. Recall should be graded on what
+  // was actually typed.
+  const attrs: Record<string, string> = {
+    autocomplete: "off",
+    autocorrect: "off",
+    autocapitalize: "off",
+    spellcheck: "false",
+  };
   if (opts.inputMode) attrs.inputmode = opts.inputMode;
   const input = inputSection.createEl("input", { type: "text", cls: "iris-answer-input", attr: attrs });
+
+  // True between compositionstart and compositionend — on Android almost all
+  // typing is composed, so anything that reads or replaces the value mid-word
+  // has to wait for the commit.
+  let composing = false;
+  controller.on(input, "compositionstart", () => { composing = true; });
+  controller.on(input, "compositionend", () => { composing = false; });
 
   // Honest out: reveal the answer and take the Again, instead of guessing
   // (which pollutes marking) or typing filler.
@@ -674,9 +795,21 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
   if (opts.autoSubmitOnMatch) {
     const checker = opts.checkAnswer ?? isExactMatch;
     if (checker) {
-      controller.on(input, "input", () => {
+      const maybeSubmit = () => {
         if (!controller.done && checker(input.value.trim())) void submitAnswer();
+      };
+      controller.on(input, "input", () => {
+        // Mid-composition the value is a half-formed guess from the IME, which
+        // can transiently equal the answer. Submitting then disables the input
+        // and swaps in the canonical answer while the IME is still composing
+        // into it — so wait for the commit.
+        if (composing) return;
+        maybeSubmit();
       });
+      // The commit itself is the moment to re-check: compositionend fires after
+      // the final input event on some Android keyboards, so the matching value
+      // may only exist here.
+      controller.on(input, "compositionend", maybeSubmit);
     }
   }
 
@@ -1450,13 +1583,23 @@ async function renderList(a: RenderArgs): Promise<void> {
   const expectedNorms = l.items.map(normalizeAnswer);
 
   inputs.forEach(input => {
+    // Same IME rule as the single-box card: never move focus or submit while a
+    // word is still being composed — on Android that tears the composition and
+    // yanks the field out from under the keyboard mid-type.
+    let composing = false;
+    const autoAdvance = () => {
+      if (controller.done) return;
+      const norm = normalizeAnswer(input.value.trim());
+      if (norm && expectedNorms.includes(norm)) advance(input, true);
+    };
+    controller.on(input, "compositionstart", () => { composing = true; });
+    controller.on(input, "compositionend", () => { composing = false; autoAdvance(); });
     controller.on(input, "keydown", e => {
       if (e.key === "Enter") { e.preventDefault(); advance(input); }
     });
     controller.on(input, "input", () => {
-      if (controller.done) return;
-      const norm = normalizeAnswer(input.value.trim());
-      if (norm && expectedNorms.includes(norm)) advance(input, true);
+      if (composing) return;
+      autoAdvance();
     });
   });
 }
@@ -1559,7 +1702,12 @@ async function renderPairs(a: RenderArgs): Promise<void> {
   if (!shown || !asked) throw new CardRenderError("Malformed pairs card.");
 
   const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-  const questionMd = `**${cap(shown.name)}:**\n\n${shown.content}\n\n**What is the ${asked.name}?**`;
+  // Mid-sentence the field name reads as a common noun ("what is the name?"),
+  // so undo title-casing — but leave acronyms and all-caps words alone.
+  const uncap = (s: string) =>
+    s.replace(/\b[A-Z][a-z]+\b/g, w => w.charAt(0).toLowerCase() + w.slice(1));
+  const askedLabel = uncap(asked.name);
+  const questionMd = `**${cap(shown.name)}:**\n\n${shown.content}\n\n**What is the ${askedLabel}?**`;
   const typeable = isTypeableContent(asked.content);
 
   if (typeable && llmMarkingEnabled(view.plugin)) {
@@ -1568,7 +1716,7 @@ async function renderPairs(a: RenderArgs): Promise<void> {
       canonicalAnswer: asked.content,
       autoSubmitOnMatch: true,
       llmMarker: {
-        question: `${cap(shown.name)}: ${shown.content}\nWhat is the ${asked.name}?`,
+        question: `${cap(shown.name)}: ${shown.content}\nWhat is the ${askedLabel}?`,
         answer: asked.content,
         acceptedAnswers: variant.acceptedAnswers,
       },
@@ -1581,6 +1729,270 @@ async function renderPairs(a: RenderArgs): Promise<void> {
     input: true,
     match: [asked.content, ...variant.acceptedAnswers],
   } : {});
+}
+
+// --- Match ---
+
+/**
+ * Two columns of boxes joined by dragged lines. The left column keeps the
+ * card's own order; the right is shuffled once per presentation (memoized in
+ * render state, so a re-render doesn't reshuffle under the learner).
+ *
+ * Interaction is pointer-events throughout rather than HTML5 drag-and-drop plus
+ * a parallel touch implementation (what the order-steps card does): pointer
+ * events cover mouse, touch and pen in one path, and HTML5 drag doesn't fire on
+ * touch at all. Two gestures land on the same code:
+ *
+ *   - drag from a box and release on one in the other column;
+ *   - tap a box, then tap one in the other column.
+ *
+ * Tap-tap matters on a phone, where a precise drag between small targets is
+ * awkward — and it's the same state machine, just with the pointer released in
+ * between.
+ *
+ * Connections are a bijection: linking to a box that's already taken steals it
+ * from its previous partner, leaving that one free rather than silently
+ * dropping the learner's earlier work.
+ */
+async function renderMatch(a: RenderArgs): Promise<void> {
+  const { view, card, cardFile, variant, controller } = a;
+  let m;
+  try {
+    m = decodeMatch(variant.question);
+  } catch {
+    throw new CardRenderError("Malformed match card.");
+  }
+
+  const questionSection = card.createDiv({ cls: "iris-question" });
+  await MarkdownRenderer.render(view.app, m.prompt, questionSection.createDiv(), "", view);
+
+  const rs = view.getRenderState(cardFile, variant);
+  // Indices into m.pairs, in the order the right column is displayed.
+  const rightOrder = getOrInit(rs, "matchRightOrder", () =>
+    shuffleArray(m.pairs.map((_, i) => i)),
+  );
+
+  const stage = card.createDiv({ cls: "iris-match" });
+  const svg = stage.createSvg("svg", { cls: "iris-match-lines" });
+  const columns = stage.createDiv({ cls: "iris-match-columns" });
+  const leftCol = columns.createDiv({ cls: "iris-match-col iris-match-col-left" });
+  const rightCol = columns.createDiv({ cls: "iris-match-col iris-match-col-right" });
+
+  const leftBoxes: HTMLElement[] = [];
+  const rightBoxes: HTMLElement[] = [];
+  for (const pair of m.pairs) {
+    const box = leftCol.createDiv({ cls: "iris-match-box", text: pair.left });
+    leftBoxes.push(box);
+  }
+  for (const pairIdx of rightOrder) {
+    const box = rightCol.createDiv({ cls: "iris-match-box", text: m.pairs[pairIdx].right });
+    rightBoxes.push(box);
+  }
+
+  /** left pair-index → right pair-index. */
+  const connections = new Map<number, number>();
+  /** The box a tap selected, awaiting its partner. */
+  let pending: { side: "left" | "right"; idx: number } | null = null;
+  /** Live line following the pointer mid-drag. */
+  let dragLine: SVGLineElement | null = null;
+
+  const boxFor = (side: "left" | "right", pairIdx: number): HTMLElement =>
+    side === "left" ? leftBoxes[pairIdx] : rightBoxes[rightOrder.indexOf(pairIdx)];
+
+  /** Anchor point of a box, in stage coordinates — inner edge, vertical centre. */
+  const anchor = (side: "left" | "right", pairIdx: number): { x: number; y: number } => {
+    const box = boxFor(side, pairIdx);
+    const b = box.getBoundingClientRect();
+    const s = stage.getBoundingClientRect();
+    return {
+      x: (side === "left" ? b.right : b.left) - s.left,
+      y: b.top + b.height / 2 - s.top,
+    };
+  };
+
+  const redraw = () => {
+    // Rebuild the committed lines. The in-flight drag line carries its own
+    // class so it survives this sweep.
+    svg.querySelectorAll(".iris-match-line").forEach(el => el.remove());
+    for (const [leftIdx, rightIdx] of connections) {
+      const from = anchor("left", leftIdx);
+      const to = anchor("right", rightIdx);
+      const line = svg.createSvg("line", { cls: "iris-match-line" });
+      line.setAttr("x1", String(from.x));
+      line.setAttr("y1", String(from.y));
+      line.setAttr("x2", String(to.x));
+      line.setAttr("y2", String(to.y));
+    }
+    updateSelection();
+  };
+
+  const updateSelection = () => {
+    leftBoxes.forEach((box, i) => {
+      box.toggleClass("iris-match-selected", pending?.side === "left" && pending.idx === i);
+      box.toggleClass("iris-match-linked", connections.has(i));
+    });
+    rightOrder.forEach((pairIdx, pos) => {
+      const box = rightBoxes[pos];
+      box.toggleClass("iris-match-selected", pending?.side === "right" && pending.idx === pairIdx);
+      box.toggleClass("iris-match-linked", Array.from(connections.values()).includes(pairIdx));
+    });
+    checkBtn.disabled = connections.size !== m.pairs.length;
+  };
+
+  /** Join two boxes, evicting whatever either end was previously bound to. */
+  const connect = (leftIdx: number, rightIdx: number) => {
+    for (const [l, r] of Array.from(connections)) {
+      if (r === rightIdx) connections.delete(l);
+    }
+    connections.set(leftIdx, rightIdx);
+    pending = null;
+    redraw();
+  };
+
+  const endDrag = () => {
+    dragLine?.remove();
+    dragLine = null;
+  };
+
+  const sideOf = (el: HTMLElement): "left" | "right" | null => {
+    if (leftBoxes.includes(el)) return "left";
+    if (rightBoxes.includes(el)) return "right";
+    return null;
+  };
+
+  /** Pair index a box element stands for, whichever column it's in. */
+  const pairIdxOf = (el: HTMLElement, side: "left" | "right"): number =>
+    side === "left" ? leftBoxes.indexOf(el) : rightOrder[rightBoxes.indexOf(el)];
+
+  /** Resolve the box under a pointer — the drop target, or null off-box. */
+  const boxUnder = (x: number, y: number): { side: "left" | "right"; idx: number } | null => {
+    const el = document.elementFromPoint(x, y);
+    const box = el?.closest(".iris-match-box") as HTMLElement | null;
+    if (!box) return null;
+    const side = sideOf(box);
+    if (!side) return null;
+    return { side, idx: pairIdxOf(box, side) };
+  };
+
+  const wireBox = (box: HTMLElement, side: "left" | "right", pairIdx: number) => {
+    controller.on(box, "pointerdown", (e) => {
+      if (controller.locked) return;
+      e.preventDefault();
+
+      // Second half of a tap-tap: a box is already armed in the other column,
+      // so this press completes the pairing instead of starting a fresh drag.
+      // Without this the second tap would just re-arm on itself and tap-tap
+      // could never connect anything.
+      if (pending && pending.side !== side) {
+        const leftIdx = pending.side === "left" ? pending.idx : pairIdx;
+        const rightIdx = pending.side === "left" ? pairIdx : pending.idx;
+        connect(leftIdx, rightIdx);
+        return;
+      }
+      // Tapping the armed box again disarms it.
+      if (pending && pending.side === side && pending.idx === pairIdx) {
+        pending = null;
+        redraw();
+        return;
+      }
+
+      // Re-touching a linked box detaches it, so a mistake is undone by
+      // grabbing either end rather than hunting for a delete affordance.
+      if (side === "left" && connections.has(pairIdx)) connections.delete(pairIdx);
+      else if (side === "right") {
+        for (const [l, r] of Array.from(connections)) {
+          if (r === pairIdx) connections.delete(l);
+        }
+      }
+
+      pending = { side, idx: pairIdx };
+      stage.setPointerCapture(e.pointerId);
+      const from = anchor(side, pairIdx);
+      dragLine = svg.createSvg("line", { cls: "iris-match-dragline" });
+      dragLine.setAttr("x1", String(from.x));
+      dragLine.setAttr("y1", String(from.y));
+      dragLine.setAttr("x2", String(from.x));
+      dragLine.setAttr("y2", String(from.y));
+      redraw();
+    });
+  };
+
+  leftBoxes.forEach((box, i) => wireBox(box, "left", i));
+  rightOrder.forEach((pairIdx, pos) => wireBox(rightBoxes[pos], "right", pairIdx));
+
+  // Move/up live on the stage rather than the box: the pointer leaves the
+  // originating box immediately, and a release in empty space must still end
+  // the drag cleanly.
+  controller.on(stage, "pointermove", (e) => {
+    if (!dragLine) return;
+    const s = stage.getBoundingClientRect();
+    dragLine.setAttr("x2", String(e.clientX - s.left));
+    dragLine.setAttr("y2", String(e.clientY - s.top));
+  });
+
+  controller.on(stage, "pointerup", (e) => {
+    if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
+    if (!pending) return;
+    const target = boxUnder(e.clientX, e.clientY);
+    endDrag();
+    // Released on the box we started from: treat it as a tap — the selection
+    // stays armed for a second tap on the other column.
+    if (target && target.side === pending.side && target.idx === pending.idx) {
+      redraw();
+      return;
+    }
+    if (target && target.side !== pending.side) {
+      const leftIdx = pending.side === "left" ? pending.idx : target.idx;
+      const rightIdx = pending.side === "left" ? target.idx : pending.idx;
+      connect(leftIdx, rightIdx);
+      return;
+    }
+    // Released on nothing (or on the same column): drop the pending selection.
+    pending = null;
+    redraw();
+  });
+
+  const checkBtn = card.createEl("button", { cls: "iris-match-check", text: "Check" });
+  checkBtn.disabled = true;
+
+  // Box positions move with the pane; committed lines have to follow. Advancing
+  // to the next card detaches the stage, which is the observer's cue to stop —
+  // the view registration only covers the case where the pane closes mid-card.
+  const ro = new ResizeObserver(() => {
+    if (!stage.isConnected) { ro.disconnect(); return; }
+    redraw();
+  });
+  ro.observe(stage);
+  view.register(() => ro.disconnect());
+
+  redraw();
+
+  controller.on(checkBtn, "click", async () => {
+    if (!controller.begin()) return;
+    checkBtn.remove();
+    endDrag();
+    pending = null;
+
+    const results = markMatch(m.pairs.length, connections);
+    const correct = results.every(Boolean);
+
+    // Mark each left box by its own verdict, then redraw the lines as the
+    // correct pairing — seeing where the line should have gone is the point of
+    // getting it wrong.
+    stage.addClass("iris-match-done");
+    leftBoxes.forEach((box, i) => {
+      box.addClass(results[i] ? "iris-match-correct" : "iris-match-incorrect");
+    });
+    connections.clear();
+    for (let i = 0; i < m.pairs.length; i++) connections.set(i, i);
+    redraw();
+
+    const markingEl = card.createDiv({ cls: "iris-marking" });
+    markingEl.setText(correct ? (view.peekedAnswer ? "Correct (peeked)" : "Correct") : "Incorrect");
+    markingEl.addClass(correct ? "iris-marking-correct" : "iris-marking-incorrect");
+
+    await controller.resolve(correct);
+  });
 }
 
 // --- Multi-step ---
@@ -1702,6 +2114,7 @@ const EXERCISE_RENDERERS: Partial<Record<ExerciseType, (a: RenderArgs) => Promis
   "Image Occlusion": renderImageOcclusion,
   "Pairs": renderPairs,
   "Multi-step": renderMultiStep,
+  "Match": renderMatch,
 };
 
 /**
@@ -1759,7 +2172,7 @@ export async function renderVariantInto(
   view: RenderContext, card: HTMLElement, cardFile: TFile, variant: QAVariant, answer: AnswerFn,
   opts: { interactive?: boolean } = {},
 ): Promise<void> {
-  const controller = new CardController(view, card, answer, variant, opts.interactive ?? true);
+  const controller = new CardController(view, card, cardFile, answer, variant, opts.interactive ?? true);
   const a: RenderArgs = { view, card, cardFile, variant, answer, controller };
   const render = EXERCISE_RENDERERS[variant.exerciseType] ?? renderQA;
   try {
@@ -1832,7 +2245,7 @@ export async function renderCurrentCard(
     });
     setIcon(editBtn, "pencil");
     editBtn.addEventListener("click", () => {
-      new CardEditModal(view.app, variant, async (authored) => {
+      new CardEditModal(view.app, view.plugin, variant, async (authored) => {
         await view.plugin.cardStore.updateVariants(cardFile, (vs) => {
           const idx = vs.findIndex(v => v.question === variant.question && v.exerciseType === variant.exerciseType);
           if (idx === -1) {
