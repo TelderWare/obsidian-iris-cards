@@ -1,4 +1,5 @@
-import { App, Modal, Notice } from "obsidian";
+import { App, Modal, Notice, TFile } from "obsidian";
+import type IrisCardsPlugin from "../main";
 import { type ExerciseType, type QAVariant } from "../types/exercises";
 import { encodePairs, decodePairs, type PairsField } from "../generators/pairs";
 import { encodeMultiStep, decodeMultiStep, type MultiStep } from "../generators/multi-step";
@@ -6,6 +7,13 @@ import { encodeTFPair, decodeTFPair } from "../generators/true-false";
 import { encodeMC, decodeMC } from "../generators/multiple-choice";
 import { encodeRank, decodeRank } from "../generators/rank";
 import { parseClozeTerms } from "../generators/cloze";
+import { llmMarkingEnabled } from "../ai";
+import { encodeList, decodeList } from "../generators/list";
+import { encodeMatch, decodeMatch, DEFAULT_MATCH_PROMPT, MIN_MATCH_PAIRS, type MatchPair } from "../generators/match";
+import { encodeOrderSteps, decodeOrderSteps } from "../generators/order-steps";
+import { encodeImageOcclusion, decodeImageOcclusion, type OcclusionRegion } from "../types/image-occlusion";
+import { ImageOcclusionEditor } from "../widgets/image-occlusion-editor";
+import { ImageSuggestModal } from "../widgets/image-suggest";
 
 /**
  * The hand-authored card-writing form ("vanilla cards interface"). One shared
@@ -27,6 +35,9 @@ import { parseClozeTerms } from "../generators/cloze";
  *     grow a fresh row as soon as the last one is touched — no add buttons.
  *   - Pasting an image into any field saves it to the vault's attachment
  *     folder and inserts the embed link.
+ *   - Image Occlusion has no text fields: it picks a vault image and hands off
+ *     to the occlusion editor, which returns regions the form then saves as a
+ *     normal card (rather than writing the card itself, as the command does).
  *   - In the Cloze type, the sentence's words render as clickable text below
  *     the box; clicking a word hides it (adjacent hidden words merge into one
  *     gap).
@@ -55,11 +66,38 @@ function mkVariant(type: ExerciseType, question: string, answer: string): QAVari
 /** Returns the authored card, or an error message to show the user. */
 type Collect = () => AuthoredCard | string;
 
+/**
+ * Synonym cards store a plain question/answer, so the authored phrasing is what
+ * lets the form recover the term when editing. Generated synonym cards are
+ * phrased freely and simply aren't editable here — same as before.
+ */
+const SYNONYM_Q_RE = /^what is another name for (.+)\?$/i;
+const synonymQuestion = (term: string) => `What is another name for ${term}?`;
+
+/** Split a one-per-line list field into trimmed, non-empty entries. */
+function lines(value: string): string[] {
+  return value.split("\n").map(l => l.trim()).filter(Boolean);
+}
+
+/** What a type's fields may reach for beyond the DOM — the vault (image picker,
+ * thumbnails) and the plugin (occlusion editor, marking-availability hints). */
+interface AuthorCtx {
+  app: App;
+  plugin: IrisCardsPlugin;
+  /**
+   * The captured fact's own sentence, when authoring a card for one. Types
+   * whose card *is* that sentence (Cloze) start from it instead of asking the
+   * author to retype what's already on screen. Absent when creating a card
+   * from scratch or editing an existing variant.
+   */
+  seedText?: string;
+}
+
 interface AuthorTypeDef {
   id: string;
   label: string;
   /** Render the type's fields; when `initial` is given, pre-fill from it. */
-  build(fields: HTMLElement, initial?: QAVariant): Collect;
+  build(fields: HTMLElement, initial: QAVariant | undefined, ctx: AuthorCtx): Collect;
 }
 
 /**
@@ -77,6 +115,12 @@ export function editableTypeId(variant: QAVariant): string | null {
       case "Multiple Choice": return decodeMC(variant.question, variant.answer).options.length >= 2 ? "mc" : null;
       case "Rank": decodeRank(variant.question, variant.answer); return "series";
       case "Multi-step": decodeMultiStep(variant.question); return "multistep";
+      case "Match": decodeMatch(variant.question); return "match";
+      case "List": decodeList(variant.question, variant.answer); return "list";
+      case "Place in Order": decodeOrderSteps(variant.question, variant.answer); return "order";
+      case "Correct the Mistake": return "mistake";
+      case "Synonym": return SYNONYM_Q_RE.test(variant.question) ? "synonym" : null;
+      case "Image Occlusion": decodeImageOcclusion(variant.question, variant.answer); return "occlusion";
       default: return null;
     }
   } catch {
@@ -91,12 +135,21 @@ function autoGrow(ta: HTMLTextAreaElement): void {
   ta.style.height = `${ta.scrollHeight + 2}px`;
 }
 
+/**
+ * Fields carry their own name in the placeholder rather than a bold label
+ * above the box. A label + a placeholder + a hint is three pieces of chrome
+ * per field, and on a form whose whole job is "type the two halves of a card"
+ * they crowd out the only thing worth looking at — the fact. `hint` survives
+ * for the few fields whose syntax genuinely can't be guessed (the mistake
+ * type's `{6.022|1.000..9.999}` ranges), and shows only once the field has
+ * focus.
+ */
 function addTextArea(parent: HTMLElement, label: string, opts: { placeholder?: string; hint?: string; multiline?: boolean } = {}): HTMLTextAreaElement {
   const field = parent.createDiv({ cls: "iris-author-field" });
-  field.createEl("label", { text: label, cls: "iris-author-label" });
   const ta = field.createEl("textarea", { cls: "iris-author-input" });
   ta.rows = 1;
-  if (opts.placeholder) ta.placeholder = opts.placeholder;
+  ta.placeholder = opts.placeholder ?? label;
+  ta.setAttr("aria-label", label);
   // List-entry fields keep Enter as newline instead of field-advance.
   if (opts.multiline) ta.dataset.multiline = "1";
   if (opts.hint) field.createDiv({ text: opts.hint, cls: "iris-author-hint" });
@@ -105,9 +158,9 @@ function addTextArea(parent: HTMLElement, label: string, opts: { placeholder?: s
 
 function addText(parent: HTMLElement, label: string, placeholder = ""): HTMLInputElement {
   const field = parent.createDiv({ cls: "iris-author-field" });
-  field.createEl("label", { text: label, cls: "iris-author-label" });
   const input = field.createEl("input", { type: "text", cls: "iris-author-input" });
-  input.placeholder = placeholder;
+  input.placeholder = placeholder || label;
+  input.setAttr("aria-label", label);
   return input;
 }
 
@@ -151,6 +204,38 @@ async function insertClipboardImage(app: App, field: HTMLTextAreaElement | HTMLI
   field.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
+const EMBED_RE = /!\[\[([^\]|#]+)[^\]]*\]\]|!\[[^\]]*\]\(([^)]+)\)/g;
+
+/**
+ * Show the images a field embeds directly under it. The fields are plain
+ * textareas, so a pasted image otherwise reads as `![[pasted-1234.png]]` and
+ * the author can't see what they actually pasted until the card comes up in
+ * review. Re-derived from the field text on every edit, so deleting the link
+ * removes the thumbnail.
+ */
+function syncImagePreviews(app: App, field: HTMLTextAreaElement | HTMLInputElement): void {
+  const targets = Array.from(field.value.matchAll(EMBED_RE))
+    .map(m => decodeURIComponent((m[1] ?? m[2] ?? "").trim()))
+    .filter(p => IMAGE_EXT.test(p));
+
+  const sibling = field.nextElementSibling;
+  const existing = sibling instanceof HTMLElement && sibling.hasClass("iris-author-previews") ? sibling : null;
+  if (targets.length === 0) {
+    existing?.remove();
+    return;
+  }
+  const strip = existing ?? createDiv({ cls: "iris-author-previews" });
+  if (!existing) field.insertAdjacentElement("afterend", strip);
+  strip.empty();
+  for (const t of targets) {
+    const file = app.metadataCache.getFirstLinkpathDest(t, "");
+    if (!file) continue;
+    strip.createEl("img", { cls: "iris-author-preview", attr: { src: app.vault.getResourcePath(file) } });
+  }
+  if (strip.childElementCount === 0) strip.remove();
+}
+
 // ─── Type definitions ───────────────────────────────────────────────────
 
 const TYPE_DEFS: AuthorTypeDef[] = [
@@ -175,18 +260,25 @@ const TYPE_DEFS: AuthorTypeDef[] = [
   {
     id: "cloze",
     label: "Cloze",
-    build(fields, initial) {
-      const s = addTextArea(fields, "Sentence", {
-        placeholder: "The capital of France is Paris.",
-      });
-      const wordsEl = fields.createDiv({ cls: "iris-cloze-words" });
-      fields.createDiv({
-        text: "Click a word below to hide it; adjacent hidden words become one gap.",
-        cls: "iris-author-hint",
-      });
+    build(fields, initial, ctx) {
+      // The sentence renders as itself — a line of words you click to hide —
+      // instead of an empty box you retype the fact into. When authoring from
+      // a captured fact the fact IS the sentence, so a second copy of it in a
+      // textarea was pure duplication. The textarea still exists as the source
+      // of truth (and as the way to reword), it's just out of the way until
+      // asked for.
+      const surface = fields.createDiv({ cls: "iris-cloze-surface" });
+      const wordsEl = surface.createDiv({ cls: "iris-cloze-words" });
+      const s = surface.createEl("textarea", { cls: "iris-author-input iris-cloze-raw iris-hidden" });
+      s.rows = 1;
+      s.placeholder = "The capital of France is Paris.";
+      s.setAttr("aria-label", "Sentence");
+      const footer = surface.createDiv({ cls: "iris-cloze-footer" });
+      const hintEl = footer.createDiv({ cls: "iris-author-hint" });
+      const rewordBtn = footer.createEl("button", { cls: "iris-cloze-reword", text: "Reword" });
 
-      // The textarea is the single source of truth; the chips are a visual
-      // editor over it — clicking a chip inserts or removes the asterisks.
+      // The textarea is the single source of truth; the words are a visual
+      // editor over it — clicking one inserts or removes the asterisks.
       const mergeAdjacentGaps = (t: string): string => {
         let prev;
         do {
@@ -223,15 +315,24 @@ const TYPE_DEFS: AuthorTypeDef[] = [
         wordsEl.empty();
         const text = s.value;
         const gapRe = /\*([^*]+)\*/g;
+        // Spacing comes from the original string, so the words read as the
+        // sentence rather than as a bag of chips.
         const addPlainChips = (plain: string, offset: number) => {
-          const wordRe = /\S+/g;
+          // A math span, wikilink or embed is one thing to hide, not a run of
+          // whitespace-separated fragments — `$\Delta G < 0$` must gap whole
+          // or the stored sentence ends up with an unbalanced `$`.
+          const wordRe = /\$[^$]+\$|!?\[\[[^\]]+\]\]|\S+/g;
+          let cursor = 0;
           let w;
           while ((w = wordRe.exec(plain))) {
+            if (w.index > cursor) wordsEl.appendText(plain.slice(cursor, w.index));
             const start = offset + w.index;
             const len = w[0].length;
             const chip = wordsEl.createEl("button", { text: w[0], cls: "iris-cloze-word" });
             chip.addEventListener("click", (e) => { e.preventDefault(); wrapWord(start, len); });
+            cursor = w.index + len;
           }
+          if (cursor < plain.length) wordsEl.appendText(plain.slice(cursor));
         };
         let last = 0;
         let m;
@@ -246,16 +347,44 @@ const TYPE_DEFS: AuthorTypeDef[] = [
           last = m.index + m[0].length;
         }
         addPlainChips(text.slice(last), last);
+
+        const gaps = parseClozeTerms(text).length;
+        hintEl.setText(
+          !text.trim() ? "Write the sentence, then tap the words to hide"
+            : gaps === 0 ? "Tap a word to hide it"
+            : `${gaps} gap${gaps === 1 ? "" : "s"} — tap to add or undo`,
+        );
       };
 
-      if (initial) s.value = initial.question;
-      s.addEventListener("input", renderWords);
+      // Seeded from the fact being carded (or the variant being edited): the
+      // sentence is already written, so start with it on screen.
+      s.value = initial?.question ?? ctx.seedText ?? "";
+
+      let rewording = false;
+      const setRewording = (on: boolean) => {
+        rewording = on;
+        s.toggleClass("iris-hidden", !on);
+        wordsEl.toggleClass("iris-hidden", on);
+        rewordBtn.setText(on ? "Done" : "Reword");
+        if (on) {
+          autoGrow(s);
+          s.focus();
+        } else {
+          renderWords();
+        }
+      };
+      rewordBtn.addEventListener("click", (e) => { e.preventDefault(); setRewording(!rewording); });
+      s.addEventListener("input", () => autoGrow(s));
+
       renderWords();
+      // Nothing to mark up yet (creating from scratch) — open straight into
+      // the text so the first keystroke goes somewhere sensible.
+      if (!s.value.trim()) setRewording(true);
 
       return () => {
         const sentence = s.value.trim();
         if (!sentence) return "A sentence is required.";
-        if (parseClozeTerms(sentence).length === 0) return "At least one word needs to be hidden — click it below the sentence.";
+        if (parseClozeTerms(sentence).length === 0) return "At least one word needs to be hidden — tap it in the sentence.";
         return { variant: mkVariant("Cloze", sentence, ""), factText: sentence };
       };
     },
@@ -341,29 +470,63 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     label: "Multiple Choice",
     build(fields, initial) {
       const q = addTextArea(fields, "Question");
-      const correct = addText(fields, "Correct answer");
-      const wrongs = [
-        addText(fields, "Wrong answer 1"),
-        addText(fields, "Wrong answer 2"),
-        addText(fields, "Wrong answer 3"),
-      ];
+      // Options are one list, not a "correct answer" field plus numbered wrong
+      // ones: which is right is a property of an option, so it's a mark on the
+      // row rather than a separate box whose position you have to remember.
+      // Four rows to start, growing on touch — leave rows empty for fewer.
+      const rows: { input: HTMLInputElement; mark: HTMLButtonElement }[] = [];
+      const optionsEl = fields.createDiv({ cls: "iris-author-options" });
+      let correctIdx = 0;
+      const paintMarks = () => {
+        rows.forEach((r, i) => {
+          const isCorrect = i === correctIdx;
+          r.mark.toggleClass("iris-author-option-correct", isCorrect);
+          r.mark.setAttr("aria-label", isCorrect ? "Correct answer" : "Mark as the correct answer");
+          r.mark.setAttr("aria-pressed", String(isCorrect));
+        });
+      };
+      const wireAutoAdd = autoAddRows(
+        () => rows.map(r => [r.input]),
+        () => addOption(),
+      );
+      const addOption = () => {
+        const row = optionsEl.createDiv({ cls: "iris-author-option-row" });
+        const mark = row.createEl("button", { cls: "iris-author-option-mark" });
+        const input = row.createEl("input", { type: "text", cls: "iris-author-input" });
+        input.placeholder = rows.length === 0 ? "Answer" : "Another option";
+        const idx = rows.length;
+        mark.addEventListener("click", (e) => { e.preventDefault(); correctIdx = idx; paintMarks(); });
+        rows.push({ input, mark });
+        wireAutoAdd([input]);
+        paintMarks();
+      };
       if (initial) {
         try {
           const mc = decodeMC(initial.question, initial.answer);
           q.value = mc.question;
-          correct.value = mc.options.find(o => o.letter === mc.correct)?.text ?? "";
-          const rest = mc.options.filter(o => o.letter !== mc.correct);
-          rest.slice(0, wrongs.length).forEach((o, i) => { wrongs[i].value = o.text; });
+          mc.options.forEach((o, i) => {
+            addOption();
+            rows[i].input.value = o.text;
+            if (o.letter === mc.correct) correctIdx = i;
+          });
+          paintMarks();
         } catch { /* vetted by editableTypeId */ }
       }
+      while (rows.length < 4) addOption();
+      if (initial && rows[rows.length - 1].input.value) addOption(); // trailing empty row
       return () => {
         const question = q.value.trim();
-        const correctText = correct.value.trim();
-        const wrongTexts = wrongs.map(w => w.value.trim()).filter(Boolean);
-        if (!question || !correctText) return "A question and a correct answer are required.";
+        const correctText = rows[correctIdx]?.input.value.trim() ?? "";
+        const wrongTexts = rows
+          .filter((_, i) => i !== correctIdx)
+          .map(r => r.input.value.trim())
+          .filter(Boolean);
+        if (!question) return "A question is required.";
+        if (!correctText) return "The option marked correct is empty.";
         if (wrongTexts.length === 0) return "At least one wrong answer is required.";
-        const letters = ["A", "B", "C", "D"];
-        const options = [correctText, ...wrongTexts].map((text, i) => ({ letter: letters[i], text }));
+        // Options are stored under letter labels, so Z is the ceiling.
+        if (wrongTexts.length > 25) return "A multiple choice card can have at most 26 options.";
+        const options = [correctText, ...wrongTexts].map((text, i) => ({ letter: String.fromCharCode(65 + i), text }));
         const e = encodeMC({ question, options, correct: "A" });
         return { variant: mkVariant("Multiple Choice", e.question, e.answer), factText: `Q: ${question}\nA: ${correctText}` };
       };
@@ -446,12 +609,263 @@ const TYPE_DEFS: AuthorTypeDef[] = [
       };
     },
   },
+  {
+    id: "match",
+    label: "Match",
+    build(fields, initial) {
+      const prompt = addTextArea(fields, "Prompt (optional)", {
+        placeholder: DEFAULT_MATCH_PROMPT,
+      });
+      fields.createDiv({
+        text: "Each row is one correct pairing. In review the right column is shuffled and the learner drags a line to each match.",
+        cls: "iris-author-hint",
+      });
+      const rows: { left: HTMLInputElement; right: HTMLInputElement }[] = [];
+      const rowsEl = fields.createDiv();
+      const wireAutoAdd = autoAddRows(
+        () => rows.map(r => [r.left, r.right]),
+        () => addRow(),
+      );
+      const addRow = () => {
+        const row = rowsEl.createDiv({ cls: "iris-author-pair-row" });
+        const left = row.createEl("input", { type: "text", cls: "iris-author-input" });
+        left.placeholder = "Left";
+        const right = row.createEl("input", { type: "text", cls: "iris-author-input" });
+        right.placeholder = "Right";
+        rows.push({ left, right });
+        wireAutoAdd([left, right]);
+      };
+      if (initial) {
+        try {
+          const m = decodeMatch(initial.question);
+          if (m.prompt !== DEFAULT_MATCH_PROMPT) prompt.value = m.prompt;
+          for (const p of m.pairs) {
+            addRow();
+            const r = rows[rows.length - 1];
+            r.left.value = p.left;
+            r.right.value = p.right;
+          }
+        } catch { /* vetted by editableTypeId */ }
+      }
+      while (rows.length < MIN_MATCH_PAIRS) addRow();
+      if (initial && rows[rows.length - 1].left.value) addRow(); // trailing empty row
+      return () => {
+        const pairs: MatchPair[] = [];
+        for (const r of rows) {
+          const left = r.left.value.trim();
+          const right = r.right.value.trim();
+          if (left && right) pairs.push({ left, right });
+          else if (left || right) return "Every row needs both sides (or leave both empty).";
+        }
+        if (pairs.length < MIN_MATCH_PAIRS) {
+          return `A match card needs at least ${MIN_MATCH_PAIRS} pairs — with two, getting one right forces the other.`;
+        }
+        const seen = new Set<string>();
+        for (const p of pairs) {
+          // Two identical boxes in a column are indistinguishable on screen, so
+          // one of the two lines would always grade wrong.
+          if (seen.has(`L${p.left}`)) return `"${p.left}" appears twice on the left.`;
+          if (seen.has(`R${p.right}`)) return `"${p.right}" appears twice on the right.`;
+          seen.add(`L${p.left}`);
+          seen.add(`R${p.right}`);
+        }
+        const e = encodeMatch({ prompt: prompt.value.trim() || DEFAULT_MATCH_PROMPT, pairs });
+        return {
+          variant: mkVariant("Match", e.question, e.answer),
+          factText: pairs.map(p => `${p.left} — ${p.right}`).join("\n"),
+        };
+      };
+    },
+  },
+  {
+    id: "list",
+    label: "List",
+    build(fields, initial, ctx) {
+      const prompt = addTextArea(fields, "Prompt", { placeholder: "Name the four humours." });
+      const items = addTextArea(fields, "Items (one per line)", {
+        multiline: true,
+        hint: "Marked unordered, so sequence doesn't matter. Each item must stand on its own.",
+      });
+      // List answers are marked item-by-item by the LLM; without that backend
+      // the review views skip List variants entirely, so say so up front rather
+      // than letting the card silently never come up.
+      if (!llmMarkingEnabled(ctx.plugin)) {
+        fields.createDiv({
+          cls: "iris-author-hint iris-author-warn",
+          text: "AI marking is off — List cards can't be marked, so they won't come up in review.",
+        });
+      }
+      if (initial) {
+        try {
+          const l = decodeList(initial.question, initial.answer);
+          prompt.value = l.prompt;
+          items.value = l.items.join("\n");
+        } catch { /* vetted by editableTypeId */ }
+      }
+      return () => {
+        const p = prompt.value.trim();
+        const list = lines(items.value);
+        if (!p) return "A prompt is required.";
+        if (list.length < 2) return "A list needs at least two items.";
+        const e = encodeList({ prompt: p, items: list });
+        return {
+          variant: mkVariant("List", e.question, e.answer),
+          factText: `${p} ${list.join(", ")}`,
+        };
+      };
+    },
+  },
+  {
+    id: "order",
+    label: "Place in order",
+    build(fields, initial) {
+      const title = addText(fields, "Process", "Steps of mitosis");
+      const steps = addTextArea(fields, "Steps, in the correct order (one per line)", {
+        multiline: true,
+        hint: "Shown shuffled, so no step may give away its position — avoid \"then\", \"finally\", \"repeat the above\".",
+      });
+      if (initial) {
+        try {
+          const os = decodeOrderSteps(initial.question, initial.answer);
+          title.value = os.title;
+          steps.value = os.steps.join("\n");
+        } catch { /* vetted by editableTypeId */ }
+      }
+      return () => {
+        const t = title.value.trim();
+        const list = lines(steps.value);
+        if (!t) return "A process name is required.";
+        // Two steps shuffle into the right order half the time — not an exercise.
+        if (list.length < 3) return "Ordering needs at least three steps.";
+        const e = encodeOrderSteps({ title: t, steps: list });
+        return {
+          variant: mkVariant("Place in Order", e.question, e.answer),
+          factText: `${t}: ${list.join(" → ")}`,
+        };
+      };
+    },
+  },
+  {
+    id: "mistake",
+    label: "Correct the mistake",
+    build(fields, initial) {
+      const wrong = addTextArea(fields, "Statement with the error", {
+        hint: "For a wrong number, write {correct|min..max} — e.g. {6.022|1.000..9.999} — and the distractor is randomised each review.",
+      });
+      const right = addTextArea(fields, "Corrected statement");
+      if (initial) {
+        wrong.value = initial.question;
+        right.value = initial.answer;
+      }
+      return () => {
+        const incorrect = wrong.value.trim();
+        const corrected = right.value.trim();
+        if (!incorrect) return "The statement with the error is required.";
+        if (!corrected) return "The corrected statement is required.";
+        if (incorrect.toLowerCase() === corrected.toLowerCase()) {
+          return "The two statements are identical — the first one needs an error in it.";
+        }
+        return {
+          variant: mkVariant("Correct the Mistake", incorrect, corrected),
+          factText: corrected,
+        };
+      };
+    },
+  },
+  {
+    id: "synonym",
+    label: "Synonym",
+    build(fields, initial) {
+      const term = addText(fields, "Term", "Krebs cycle");
+      const alt = addText(fields, "Alternate name", "citric acid cycle");
+      if (initial) {
+        term.value = SYNONYM_Q_RE.exec(initial.question)?.[1] ?? "";
+        alt.value = initial.answer;
+      }
+      return () => {
+        const t = term.value.trim();
+        const a = alt.value.trim();
+        if (!t) return "A term is required.";
+        if (!a) return "An alternate name is required.";
+        return {
+          variant: mkVariant("Synonym", synonymQuestion(t), a),
+          factText: `${t} is also known as ${a}.`,
+        };
+      };
+    },
+  },
+  {
+    id: "occlusion",
+    label: "Image occlusion",
+    build(fields, initial, ctx) {
+      let imageFile: TFile | null = null;
+      let regions: OcclusionRegion[] = [];
+
+      // The buttons name themselves ("Choose image…"), so no label above them.
+      const field = fields.createDiv({ cls: "iris-author-field" });
+      const row = field.createDiv({ cls: "iris-author-occlusion-row" });
+      const pickBtn = row.createEl("button", { text: "Choose image…", attr: { type: "button" } });
+      const regionBtn = row.createEl("button", { text: "Edit regions…", attr: { type: "button" } });
+      // Always-visible: this one reports state (which image, how many
+      // regions), not syntax, so it mustn't collapse with the focus-only hints.
+      const status = field.createDiv({ cls: "iris-author-hint iris-author-status" });
+      const thumb = field.createDiv({ cls: "iris-author-previews" });
+
+      const refresh = () => {
+        regionBtn.disabled = !imageFile;
+        thumb.empty();
+        if (imageFile) {
+          thumb.createEl("img", { cls: "iris-author-preview", attr: { src: ctx.app.vault.getResourcePath(imageFile) } });
+        }
+        status.setText(imageFile
+          ? `${imageFile.name} — ${regions.length} region${regions.length === 1 ? "" : "s"}`
+          : "No image chosen.");
+      };
+
+      pickBtn.addEventListener("click", () => {
+        new ImageSuggestModal(ctx.app, (file) => {
+          // A different image invalidates the regions drawn on the old one.
+          if (imageFile && file.path !== imageFile.path) regions = [];
+          imageFile = file;
+          refresh();
+        }).open();
+      });
+
+      regionBtn.addEventListener("click", () => {
+        if (!imageFile) return;
+        new ImageOcclusionEditor(ctx.app, ctx.plugin, imageFile, regions, (drawn) => {
+          regions = drawn;
+          refresh();
+        }, "Done").open();
+      });
+
+      if (initial) {
+        try {
+          const d = decodeImageOcclusion(initial.question, initial.answer);
+          imageFile = ctx.app.metadataCache.getFirstLinkpathDest(d.imagePath, "");
+          regions = d.regions;
+        } catch { /* vetted by editableTypeId */ }
+      }
+      refresh();
+
+      return () => {
+        if (!imageFile) return "Choose an image first.";
+        if (regions.length === 0) return "Draw at least one region to hide.";
+        const e = encodeImageOcclusion(`![[${imageFile.path}]]`, regions);
+        return {
+          variant: mkVariant("Image Occlusion", e.question, e.answer),
+          factText: `![[${imageFile.path}]]`,
+        };
+      };
+    },
+  },
 ];
 
 // ─── Form builder ───────────────────────────────────────────────────────
 
 export interface CardAuthorFormOpts {
   app: App;
+  plugin: IrisCardsPlugin;
   saveLabel?: string;
   /** Type chip preselected when the form opens (last-used); defaults to Q&A. */
   initialTypeId?: string;
@@ -460,6 +874,10 @@ export interface CardAuthorFormOpts {
   /** Reports chip changes so callers can remember the last-used type. */
   onTypeChange?: (typeId: string) => void;
   onSave: (card: AuthoredCard) => void | Promise<void>;
+  /** The fact's own sentence, for types that start from it (see AuthorCtx). */
+  seedText?: string;
+  /** Extra controls for the footer's left side (the review flow's Later/discard). */
+  buildSecondaryActions?: (host: HTMLElement) => void;
 }
 
 /**
@@ -470,16 +888,21 @@ export interface CardAuthorFormOpts {
 export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorFormOpts): void {
   const form = container.createDiv({ cls: "iris-author-form" });
 
-  const picker = form.createDiv({ cls: "iris-author-typerow" });
-  picker.createEl("label", { text: "Type", cls: "iris-author-label" });
-  const typeSelect = picker.createEl("select", { cls: "dropdown" });
-  for (const def of TYPE_DEFS) {
-    typeSelect.createEl("option", { text: def.label, attr: { value: def.id } });
-  }
+  // Fields first, chrome last. The type picker sits in the footer beside Save
+  // rather than above the fields: it's a decision about the card you're
+  // writing, not a heading for it, and putting it up top made every card start
+  // with a labelled dropdown instead of the fact.
   const fieldsHost = form.createDiv({ cls: "iris-author-fields" });
   const errorEl = form.createDiv({ cls: "iris-author-error" });
   const actions = form.createDiv({ cls: "iris-author-actions" });
-  const saveBtn = actions.createEl("button", { cls: "mod-cta iris-author-save", text: opts.saveLabel ?? "Save card" });
+  const typeSelect = actions.createEl("select", { cls: "dropdown iris-author-type" });
+  typeSelect.setAttr("aria-label", "Card type");
+  for (const def of TYPE_DEFS) {
+    typeSelect.createEl("option", { text: def.label, attr: { value: def.id } });
+  }
+  const secondary = actions.createDiv({ cls: "iris-author-secondary" });
+  opts.buildSecondaryActions?.(secondary);
+  const saveBtn = actions.createEl("button", { cls: "iris-author-save", text: opts.saveLabel ?? "Save card" });
 
   const prefillTypeId = opts.initial ? editableTypeId(opts.initial) : null;
 
@@ -494,7 +917,10 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
     let entry = built.get(def.id);
     if (!entry) {
       const el = fieldsHost.createDiv();
-      entry = { el, collect: def.build(el, def.id === prefillTypeId ? opts.initial : undefined) };
+      entry = {
+        el,
+        collect: def.build(el, def.id === prefillTypeId ? opts.initial : undefined, { app: opts.app, plugin: opts.plugin, seedText: opts.seedText }),
+      };
       built.set(def.id, entry);
     }
     for (const e of built.values()) e.el.style.display = e === entry ? "" : "none";
@@ -502,6 +928,9 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
     // Heights measure as 0 while hidden — grow now that the fields are visible.
     for (const ta of Array.from(entry.el.querySelectorAll("textarea"))) autoGrow(ta);
     const inputs = Array.from(entry.el.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"));
+    // Prefilled fields (editing an existing card) never fire input, so seed
+    // their thumbnails here.
+    for (const i of inputs) syncImagePreviews(opts.app, i);
     const target = inputs.find(i => !i.value.trim()) ?? inputs[0];
     window.setTimeout(() => target?.focus(), 0);
     opts.onTypeChange?.(def.id);
@@ -562,6 +991,9 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
   // Textareas track their content height.
   form.addEventListener("input", (e) => {
     if (e.target instanceof HTMLTextAreaElement) autoGrow(e.target);
+    if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) {
+      syncImagePreviews(opts.app, e.target);
+    }
   });
 
   // Pasting an image into any field embeds it (saved to the attachment folder).
@@ -590,6 +1022,7 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
 export class CardEditModal extends Modal {
   constructor(
     app: App,
+    private plugin: IrisCardsPlugin,
     private variant: QAVariant,
     private onSaved: (card: AuthoredCard) => Promise<void>,
   ) {
@@ -603,6 +1036,7 @@ export class CardEditModal extends Modal {
     this.setTitle("Edit card");
     buildCardAuthorForm(contentEl, {
       app: this.app,
+      plugin: this.plugin,
       saveLabel: "Save changes",
       initial: this.variant,
       onSave: async (authored) => {

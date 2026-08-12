@@ -158,6 +158,25 @@
   display: none;
 }
 
+/* Obsidian's mobile navbar floats *over* the bottom of the view — the pane
+   thinks it owns that strip, so anything the card puts there (the rating row,
+   the answer input) is both invisible and untappable, and scrolling can't
+   reach it because the scroll body's own bottom is underneath the navbar.
+   Ending the scroll body above the navbar is what makes "scrolled into view"
+   mean genuinely visible; measured at 52px, plus a little breathing room. */
+.is-mobile .iris-review .iris-scroll-body {
+  margin-bottom: 60px;
+}
+
+/* The corner icons are pinned to the card's bottom edge. On a desktop-width
+   card they sit far outside the centred action row; on a phone the card is
+   barely wider than the row, so open-file and edit land on top of the end
+   buttons and swallow the tap. Extra bottom padding lifts the row clear of
+   the icon band. */
+.is-mobile .iris-review .iris-card {
+  padding-bottom: 72px;
+}
+
 /* Centering spacers removed - each card is a full screen and centers its
    own content (see .iris-review .iris-card). */
 
@@ -304,6 +323,42 @@ button.iris-rate-btn:hover {
 
 .iris-pre-rating {
   visibility: hidden;
+}
+
+.iris-author-occlusion-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.iris-author-warn {
+  color: var(--text-warning);
+}
+
+/* Thumbnails of images a card-author field embeds, under that field. */
+.iris-author-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 2px;
+}
+
+.iris-author-preview {
+  max-height: 120px;
+  max-width: 100%;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  object-fit: contain;
+}
+
+/* Post-incorrect hold: the only action on a wrong answer, so give it a little
+   more weight than a grade button. */
+button.iris-continue-btn {
+  /* Vertical padding matches .iris-rate-btn: this row stands in for the
+     pre-rendered rating row, and a taller button would grow the card past the
+     height locked before marking. */
+  padding: 4px 20px;
+  color: var(--text-muted);
 }
 
 .iris-hidden {
@@ -644,6 +699,100 @@ button.iris-card-icon {
   margin-top: 12px;
 }
 
+/* Match — two columns of boxes joined by dragged lines. The SVG overlays the
+   columns at the same size, so line coordinates are plain stage offsets. */
+.iris-match {
+  position: relative;
+  width: 100%;
+  max-width: 620px;
+  margin: 16px 0;
+}
+
+.iris-match-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.iris-match-columns {
+  display: flex;
+  gap: 56px;
+  align-items: stretch;
+}
+
+.iris-match-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.iris-match-box {
+  padding: 8px 12px;
+  background: var(--background-primary);
+  border: 2px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  overflow-wrap: anywhere;
+  /* The gesture is a drag; without this the browser scrolls the pane instead
+     of delivering pointermove. */
+  touch-action: none;
+}
+
+.iris-match-box:hover {
+  border-color: var(--background-modifier-border-hover);
+}
+
+.iris-match-linked {
+  border-color: var(--interactive-accent);
+}
+
+.iris-match-selected {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+.iris-match-line {
+  stroke: var(--interactive-accent);
+  stroke-width: 2;
+}
+
+.iris-match-dragline {
+  stroke: var(--interactive-accent);
+  stroke-width: 2;
+  stroke-dasharray: 4 4;
+}
+
+.iris-match-done .iris-match-box {
+  cursor: default;
+}
+
+.iris-match-correct {
+  border-color: var(--interactive-accent) !important;
+}
+
+.iris-match-incorrect {
+  border-color: var(--text-error) !important;
+}
+
+.iris-match-check {
+  margin-top: 12px;
+}
+
+/* Narrow panes (and phones) can't hold two readable columns side by side with
+   a 56px gutter — tighten it rather than wrapping the columns, which would put
+   both ends of a line on top of each other. */
+@media (max-width: 480px) {
+  .iris-match-columns {
+    gap: 28px;
+  }
+}
+
 .iris-error {
   color: var(--text-error);
 }
@@ -731,6 +880,22 @@ button.iris-card-icon {
   font-weight: normal;
 }
 
+/* On the full review card, "Don't know" is a small corner button, not a
+   full-width row among the real answers. Anchored above the bottom-right edit
+   pencil, sharing the .iris-card-icon corner insets. The homepage widget keeps
+   the in-flow version above (it has no card corners to anchor to). */
+.iris-review .iris-mc-options .iris-dont-know {
+  position: absolute;
+  width: auto;
+  max-width: none;
+  bottom: 40px;
+  right: 14px;
+  margin: 0;
+  padding: 5px 12px;
+  font-size: 0.8em;
+  border-radius: 6px;
+}
+
 /* "Don't know" on typed-input cards — reveal the answer, take the Again */
 button.iris-dont-know-btn {
   align-self: center;
@@ -746,6 +911,29 @@ button.iris-dont-know-btn {
 button.iris-dont-know-btn:hover {
   color: var(--text-muted);
   text-decoration: underline;
+}
+
+/* "Cheated" sits in the post-answer action row but isn't a grade — keep it
+   quiet so it never competes with Hard/Medium/Easy for the eye. */
+button.iris-cheat-btn {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text-faint);
+  font-size: 0.85em;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+button.iris-cheat-btn:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
+}
+
+button.iris-cheat-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
 }
 
 /* Teaching mode — modal */
@@ -1316,83 +1504,134 @@ button.iris-browse-group-btn {
   text-align: left;
 }
 
-.iris-author-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.iris-author-title {
-  font-size: 0.95em;
-  font-weight: var(--font-semibold);
-  color: var(--text-muted);
-}
-
-.iris-author-later {
-  padding: 4px 12px;
+button.iris-author-later {
+  padding: 4px 10px;
   font-size: 0.85em;
   background: transparent;
-  color: var(--text-muted);
+  box-shadow: none;
+  color: var(--text-faint);
   border: none;
   cursor: pointer;
 }
 
-.iris-author-later:hover {
+button.iris-author-later:hover {
   color: var(--text-normal);
+  background: transparent;
 }
 
+/* The capture breadcrumb — orientation, not content. Stays put whichever type
+   is selected, including when Cloze takes the sentence below it. */
+.iris-author-context {
+  font-size: 0.85em;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.iris-author-context > *:first-child { margin-top: 0; }
+.iris-author-context > *:last-child { margin-bottom: 0; }
+
+/* The fact is the content — everything else on this screen is chrome for
+   turning it into a card, so it reads at review size and gets the top slot. */
 .iris-author-fact {
-  margin-bottom: 14px;
+  font-size: 1.25em;
+  line-height: 1.5;
+  margin-bottom: 20px;
 }
 
 .iris-author-fact > *:first-child { margin-top: 0; }
 .iris-author-fact > *:last-child { margin-bottom: 0; }
 
-.iris-author-typerow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.iris-author-typerow .iris-author-label {
-  margin-bottom: 0;
-}
-
 .iris-author-field {
-  margin-bottom: 10px;
-}
-
-.iris-author-label {
-  display: block;
   margin-bottom: 4px;
-  font-size: 0.85em;
-  font-weight: var(--font-semibold);
-  color: var(--text-muted);
 }
 
+/* Underline, not a box. A form of six boxed inputs reads as a form; the same
+   six as hairlines reads as the card taking shape. */
 .iris-author-input {
   width: 100%;
   font-family: inherit;
-  font-size: 1em;
-  line-height: 1.5;
+  font-size: 1.05em;
+  line-height: 1.6;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 6px 2px;
+}
+
+.iris-author-input:focus,
+.iris-author-input:hover {
+  box-shadow: none;
+  border-color: var(--text-accent);
+}
+
+.iris-author-input::placeholder {
+  color: var(--text-faint);
 }
 
 /* Auto-grown by script — no manual resize handle or inner scrollbar needed. */
 textarea.iris-author-input {
   resize: none;
   overflow-y: hidden;
-  min-height: calc(1.5em + 12px);
+  min-height: calc(1.6em + 12px);
 }
 
+/* Syntax hints are for the moment you're in the field, not a permanent line
+   of small print under every card you write. */
 .iris-author-hint {
-  margin: 4px 0 10px;
+  margin: 2px 0 8px;
   font-size: 0.8em;
   color: var(--text-faint);
+}
+
+.iris-author-field .iris-author-hint {
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 120ms ease, opacity 120ms ease, margin 120ms ease;
+}
+
+.iris-author-field:focus-within .iris-author-hint,
+.iris-author-field .iris-author-status {
+  max-height: 4em;
+  margin: 4px 0 8px;
+  opacity: 1;
+}
+
+/* Multiple choice: which option is right is a mark on the option, not a
+   separate field whose position you have to keep straight. */
+.iris-author-options {
+  margin: 6px 0 2px;
+}
+
+.iris-author-option-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+button.iris-author-option-mark {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--background-modifier-border);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+button.iris-author-option-mark:hover {
+  border-color: var(--text-muted);
+  background: transparent;
+}
+
+button.iris-author-option-mark.iris-author-option-correct {
+  border-color: var(--text-accent);
+  border-width: 5px;
 }
 
 .iris-author-pair-row {
@@ -1428,10 +1667,118 @@ textarea.iris-author-input {
   margin: 4px 0;
 }
 
+/* One quiet footer holds every control that isn't the card: the type, the
+   review flow's Later/discard, and Save. */
 .iris-author-actions {
   display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.iris-author-secondary {
+  margin-left: auto;
+}
+
+select.dropdown.iris-author-type {
+  height: auto;
+  padding: 4px 22px 4px 8px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+select.dropdown.iris-author-type:hover {
+  color: var(--text-normal);
+}
+
+button.iris-author-save {
+  padding: 5px 16px;
+  font-size: 0.9em;
+  color: var(--text-accent);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+button.iris-author-save:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* Cloze: the sentence itself is the control — words are clickable in place,
+   so there's no second copy of the fact sitting in a box below it. */
+.iris-cloze-surface {
+  margin: 2px 0 4px;
+}
+
+.iris-cloze-words {
+  font-size: 1.25em;
+  line-height: 1.9;
+  white-space: pre-wrap;
+}
+
+button.iris-cloze-word {
+  /* The gaps between words come from the sentence's own spaces (the container
+     is pre-wrap), so the button contributes none of its own — otherwise the
+     sentence reads letter-spaced rather than as prose. */
+  margin: 0;
+  padding: 0 2px;
+  height: auto;
+  font-size: inherit;
+  font-family: inherit;
+  line-height: inherit;
+  color: var(--text-normal);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+button.iris-cloze-word:hover {
+  background: var(--background-modifier-hover);
+}
+
+button.iris-cloze-word.iris-cloze-gap {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+
+textarea.iris-cloze-raw {
+  font-size: 1.25em;
+  line-height: 1.6;
+}
+
+.iris-cloze-footer {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.iris-cloze-footer .iris-author-hint {
+  margin: 0;
+}
+
+button.iris-cloze-reword {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+button.iris-cloze-reword:hover {
+  color: var(--text-normal);
+  background: transparent;
 }
 
 /* ─── Property series (rank order mode) ──────────────────────────────── */
@@ -1476,34 +1823,6 @@ textarea.iris-author-input {
 .iris-multistep-step + .iris-multistep-step {
   padding-top: 14px;
   border-top: 1px solid var(--background-modifier-border);
-}
-
-/* Cloze word chips — click to hide/unhide words in the sentence */
-.iris-cloze-words {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 5px;
-  margin: 8px 0 4px;
-  min-height: 1.6em;
-}
-
-.iris-cloze-word {
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-size: 0.95em;
-  line-height: 1.5;
-  color: var(--text-normal);
-  cursor: pointer;
-}
-
-.iris-cloze-word:hover {
-  text-decoration: underline;
-}
-
-.iris-cloze-word.iris-cloze-gap {
-  text-decoration: underline;
-  font-weight: 600;
 }
 
 /* Edit pencil on the current review card (bottom-right corner) */
