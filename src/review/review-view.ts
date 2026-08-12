@@ -33,6 +33,21 @@ function itemKey(item: ReviewItem): string {
   return item.rowKey ? `${item.file.path}\0row\0${item.rowKey}` : item.file.path;
 }
 
+/**
+ * The prose a captured fact is actually about, for seeding the types whose
+ * card *is* that sentence. Embed-only lines are dropped: an image has no words
+ * to hide, so a Cloze seeded with `![[diagram.png]]` would just be wrong.
+ * Returns undefined when nothing quotable is left.
+ */
+function factSentence(body: string): string | undefined {
+  const text = body
+    .split("\n")
+    .filter(l => !/^\s*!\[/.test(l))
+    .join("\n")
+    .trim();
+  return text || undefined;
+}
+
 export const VIEW_TYPE_REVIEW = "iris-cards-review";
 
 export class ReviewView extends ItemView {
@@ -73,7 +88,6 @@ export class ReviewView extends ItemView {
   peekedAnswer = false;
   scrollAnimId = 0;
   renderStateCache = new Map<string, Record<string, unknown>>();
-  private vpResizeCleanup: (() => void) | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: IrisCardsPlugin) {
     super(leaf);
@@ -102,8 +116,6 @@ export class ReviewView extends ItemView {
   async onClose(): Promise<void> {
     this.plugin.reviewViews.delete(this);
     this.clearDoneCheck();
-    this.vpResizeCleanup?.();
-    this.vpResizeCleanup = null;
     this.layoutReady = false;
     this.contentEl.empty();
   }
@@ -474,61 +486,14 @@ export class ReviewView extends ItemView {
 
     this.layoutReady = true;
 
-    // Mobile: when the virtual keyboard opens, the visual viewport shrinks.
-    // On platforms where the keyboard overlays/pans the webview instead of
-    // resizing it, the layout still believes it has full height — the bottom
-    // of the card is pushed off-screen with no scrollbar able to reach it
-    // (it "disappears" rather than being covered). Clamp the view to the
-    // visible area so content reflows and the scroll body becomes genuinely
-    // scrollable, then bring the focused input back into view.
-    this.vpResizeCleanup?.();
-    const vv = window.visualViewport;
-    if (vv) {
-      let timer = 0;
-      const onViewportChange = () => {
-        clearTimeout(timer);
-        timer = window.setTimeout(() => {
-          // Measure from the *unclamped* layout every time so the decision can
-          // never feed back on itself — clamping shrinks the view, which would
-          // otherwise flip the condition off and oscillate. Clear first, read,
-          // then re-apply only if still needed.
-          container.style.maxHeight = "";
-          const rect = container.getBoundingClientRect();
-          const viewportBottom = vv.offsetTop + vv.height;
-          // The reliable signal in BOTH Android modes (webview resized, or
-          // keyboard overlaid on top) is the same: the view's natural bottom
-          // extends past the visible fold. `window.innerHeight` can't tell the
-          // two modes apart, so don't trust it — use the geometry directly.
-          if (rect.bottom - viewportBottom > 60) {
-            container.style.maxHeight = `${Math.max(160, Math.round(viewportBottom - rect.top))}px`;
-          }
-          const el = document.activeElement;
-          if (el instanceof HTMLInputElement && this.scrollBody?.contains(el)) {
-            // Only pull the input back when it's actually outside the visible
-            // area. This handler fires on every keyboard-geometry change
-            // (including the suggestion bar growing/shrinking mid-word), and
-            // re-scrolling while the user types both yanks the question away
-            // and interrupts Android IME composition — which is how typed
-            // text ends up garbled/reversed.
-            const r = el.getBoundingClientRect();
-            const visible = r.top >= vv.offsetTop && r.bottom <= viewportBottom;
-            // `center`, not `nearest`: keep the question visible above the
-            // input rather than pinning the input to the top edge.
-            if (!visible) el.scrollIntoView({ block: "center" });
-          }
-        }, 150);
-      };
-      // `scroll` fires when the OS pans the visual viewport (offsetTop changes
-      // without a resize) — both signals feed the same debounced re-measure.
-      vv.addEventListener("resize", onViewportChange);
-      vv.addEventListener("scroll", onViewportChange);
-      this.vpResizeCleanup = () => {
-        clearTimeout(timer);
-        vv.removeEventListener("resize", onViewportChange);
-        vv.removeEventListener("scroll", onViewportChange);
-        container.style.maxHeight = "";
-      };
-    }
+    // No virtual-keyboard handling here on purpose. Obsidian mobile already
+    // resizes its own webview when the keyboard opens; a plugin re-measuring
+    // the visual viewport and clamping its container on top of that is fighting
+    // the host for control of the layout, and every such adjustment lands
+    // mid-IME-composition — which is what garbled and reversed typed text.
+    // If the bottom of a card turns out to be genuinely unreachable behind the
+    // keyboard, fix it with layout (the scroll body owning its own height) and
+    // never with a scroll or reflow driven by viewport events while typing.
   }
 
   /**
@@ -619,7 +584,12 @@ export class ReviewView extends ItemView {
     const id = ++this.scrollAnimId;
     requestAnimationFrame(() => {
       if (id !== this.scrollAnimId) return;
-      const target = el.offsetTop - (body.clientHeight - el.offsetHeight) / 2;
+      // Centring a card that's taller than the pane lands you in its middle,
+      // with the question already scrolled off the top — read it from the top
+      // instead. Only cards that fit get centred.
+      const target = el.offsetHeight > body.clientHeight
+        ? el.offsetTop
+        : el.offsetTop - (body.clientHeight - el.offsetHeight) / 2;
       const start = body.scrollTop;
       const delta = target - start;
       if (Math.abs(delta) < 1) { body.scrollTop = target; return; }
@@ -640,7 +610,7 @@ export class ReviewView extends ItemView {
     this.clearDoneCheck();
     this.ensureLayout();
     const body = this.scrollBody!;
-    body.querySelectorAll(".iris-author-card").forEach((el) => el.remove());
+    body.empty();
 
     const card = body.createDiv({ cls: "iris-card iris-done-card" });
 
@@ -830,8 +800,9 @@ export class ReviewView extends ItemView {
     }
 
     const body = this.scrollBody!;
-    // Remove stale author cards and done card; answered cards stay
-    body.querySelectorAll(".iris-author-card, .iris-done-card").forEach((el) => el.remove());
+    // The review page shows exactly one card — the incoming one replaces
+    // whatever was there, answered cards included.
+    body.empty();
 
     if (item.rowKey) {
       await this.renderRowCard(item);
@@ -913,9 +884,11 @@ export class ReviewView extends ItemView {
     const card = body.createDiv({ cls: "iris-card iris-author-card" });
     this.currentCardEl = card;
 
-    const header = card.createDiv({ cls: "iris-author-header" });
-    header.createDiv({ cls: "iris-author-title", text: "New fact — how should it quiz you?" });
-    const headerBtns = header.createDiv({ cls: "iris-author-header-btns" });
+    // No header question and no divider: the fact is the first thing on the
+    // card, and a form with a type control already asks "how should this quiz
+    // you?" without a sentence saying so. Later/discard live in the footer
+    // beside Save (built below, once the form exists to host them).
+    const headerBtns = createDiv({ cls: "iris-author-header-btns" });
     const laterBtn = headerBtns.createEl("button", { cls: "iris-author-later", text: "Later" });
 
     // A junk capture shouldn't cycle forever — trash it here. Two clicks so a
@@ -952,15 +925,39 @@ export class ReviewView extends ItemView {
     try {
       factBody = (await getParsedCached(this.app, cardFile)).body;
     } catch { /* body stays empty */ }
-    if (factBody) {
-      const factEl = card.createDiv({ cls: "iris-author-fact" });
-      await MarkdownRenderer.render(this.app, factBody, factEl, cardFile.path, this);
+    // The "(Context: …)" breadcrumb is separated from the fact itself: it
+    // orients you no matter which type is selected, while the sentence below
+    // it is what Cloze takes over.
+    const isContext = (l: string) => /^\s*\(Context:/i.test(l);
+    const contextLines = factBody.split("\n").filter(isContext);
+    const factRest = factBody.split("\n").filter(l => !isContext(l)).join("\n").trim();
+    const seedText = factSentence(factRest);
+    if (contextLines.length > 0) {
+      const ctxEl = card.createDiv({ cls: "iris-author-context" });
+      await MarkdownRenderer.render(this.app, contextLines.join("\n"), ctxEl, cardFile.path, this);
+    }
+    let factEl: HTMLElement | null = null;
+    if (factRest) {
+      factEl = card.createDiv({ cls: "iris-author-fact" });
+      await MarkdownRenderer.render(this.app, factRest, factEl, cardFile.path, this);
     }
 
     buildCardAuthorForm(card, {
       app: this.app,
+      plugin: this.plugin,
       initialTypeId: this.plugin.settings.authorLastType,
-      onTypeChange: (id) => void this.plugin.updateSetting("authorLastType", id),
+      onTypeChange: (id) => {
+        void this.plugin.updateSetting("authorLastType", id);
+        // Cloze shows the fact's own sentence as its editable surface, so the
+        // rendered fact above it would be the same sentence twice. Only hide it
+        // when it really is just that sentence — a fact that also carries an
+        // image keeps its block, since the image isn't in the cloze surface.
+        factEl?.toggleClass("iris-hidden", id === "cloze" && factRest === seedText);
+      },
+      // The fact's own sentence, minus the "(Context: …)" breadcrumb, so a
+      // Cloze starts as the fact itself rather than an empty box.
+      seedText,
+      buildSecondaryActions: (host) => host.appendChild(headerBtns),
       onSave: async (authored) => {
         await this.plugin.cardStore.updateVariants(cardFile, (vs) => { vs.push(authored.variant); });
         invalidateParsedCache(cardFile.path);
@@ -1049,13 +1046,17 @@ export class ReviewView extends ItemView {
     }
   }
 
-  /** Freeze the current card as answered — disable interactions, keep answer visible. */
+  /**
+   * Freeze the current card as answered — disable interactions, keep the answer
+   * visible. The card is replaced as soon as the next one renders; this covers
+   * the window while the review is still being written to disk.
+   */
   private freezeCurrentCard(): void {
     if (!this.currentCardEl) return;
     this.currentCardEl.addClass("iris-card-answered");
     // Reveal answer in manual mode
     this.currentCardEl.querySelectorAll(".iris-answer").forEach(el => el.removeClass("iris-hidden"));
-    // Remove elements that no longer apply; keep suspend + appeal for scroll-back
+    // Remove elements that no longer apply
     this.currentCardEl.querySelectorAll(".iris-actions, .iris-show-btn").forEach(el => el.remove());
     this.currentCardEl.querySelectorAll<HTMLInputElement>(".iris-answer-input").forEach(el => { el.disabled = true; });
   }
@@ -1090,9 +1091,20 @@ export class ReviewView extends ItemView {
     // Skip recording when the user peeked (not a genuine review) or when infinite
     // mode is on (infinite mode is for practice; nothing feeds back into FSRS).
     if (!this.peekedAnswer && !this.infiniteMode) {
-      await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs, gapTerm, grade, this.plugin.settings.cardsFolder, this.plugin.settings.desiredRetention, this.plugin.settings.scheduler);
-      for (const other of this.plugin.reviewViews) {
-        if (other !== this) other.handleExternalRate(file);
+      try {
+        await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs, gapTerm, grade, this.plugin.settings.cardsFolder, this.plugin.settings.desiredRetention, this.plugin.settings.scheduler);
+        for (const other of this.plugin.reviewViews) {
+          if (other !== this) other.handleExternalRate(file);
+        }
+      } catch (e) {
+        // A card that can't be written — unparseable frontmatter after a sync
+        // conflict merged two copies of it, a permissions problem — used to end
+        // the session: the throw escaped before the queue advanced, leaving the
+        // answered card frozen with its buttons already stripped and no way
+        // forward. It came back due next session and froze again. Name the file
+        // and move on; one bad card must not be able to stop a review.
+        console.error("[iris-cards] failed to record review", file.path, e);
+        new Notice(`Couldn't record this review — ${file.basename} may be malformed. Skipping it.\nRun "Check card health" to see the details.`, 8000);
       }
     }
 
@@ -1106,10 +1118,16 @@ export class ReviewView extends ItemView {
     this.renderStateCache.delete(item.file.path + "\0" + questionShown);
 
     if (!this.peekedAnswer && !this.infiniteMode) {
-      await this.plugin.tableStore.recordRowReview(
-        item.file, item.rowKey!, correct, grade, elapsedMs,
-        this.plugin.settings.desiredRetention,
-      );
+      // Same contract as rateCard: an unwritable table must not strand the row.
+      try {
+        await this.plugin.tableStore.recordRowReview(
+          item.file, item.rowKey!, correct, grade, elapsedMs,
+          this.plugin.settings.desiredRetention,
+        );
+      } catch (e) {
+        console.error("[iris-cards] failed to record row review", item.file.path, e);
+        new Notice(`Couldn't record this review — ${item.file.basename} may be malformed. Skipping it.\n${e instanceof Error ? e.message : String(e)}`, 8000);
+      }
     }
 
     await this.advanceAfterRate();
@@ -1176,8 +1194,7 @@ export class ReviewView extends ItemView {
       await this.plugin.tableStore.suspendRow(item.file, item.rowKey!);
       this.plugin.updateBadge();
       // Only advance if this row is still the current head — the button stays
-      // clickable on answered cards the user scrolled back to, and those have
-      // already left the queue.
+      // clickable on a frozen answered card, which has already left the queue.
       if (this.dueCards[0] && itemKey(this.dueCards[0]) === itemKey(item)) {
         this.dueCards.shift();
         await this.showNextCard();
