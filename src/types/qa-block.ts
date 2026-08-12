@@ -27,17 +27,19 @@ export function parseQABlock(fullContent: string): ParsedQA {
   let recordMs: number | null = null;
   let difficulty: number | null = null;
   let gapDifficulties: Record<string, number> | undefined;
+  let rephrase = false;
 
   const exerciseSet = new Set<string>(EXERCISE_TYPES);
   const LEGACY_ALIASES: Record<string, ExerciseType> = { "Order Steps": "Place in Order" };
 
   // Types whose entire payload lives in Q — no A: line is stored. Cloze encodes
-  // gap terms as *stars*; paired True/False holds both statements; Pairs and
-  // Multi-step store their sides/steps as readable `name::`/`Q1::` lines in Q.
-  const NO_ANSWER_TYPES = new Set<ExerciseType>(["Cloze", "True/False", "Word", "Pairs", "Multi-step"]);
+  // gap terms as *stars*; paired True/False holds both statements; Pairs,
+  // Multi-step and Match store their sides/steps/pairings as readable
+  // `name::`/`Q1::`/`left::` lines in Q.
+  const NO_ANSWER_TYPES = new Set<ExerciseType>(["Cloze", "True/False", "Word", "Pairs", "Multi-step", "Match"]);
 
   const pushVariant = () => {
-    if (q && (a || NO_ANSWER_TYPES.has(type))) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, knownIncorrect: incorrect, lastReviewed: reviewed, suspended, recordMs, difficulty, gapDifficulties });
+    if (q && (a || NO_ANSWER_TYPES.has(type))) variants.push({ exerciseType: type, question: q, answer: a, acceptedAnswers: accepted, knownIncorrect: incorrect, lastReviewed: reviewed, suspended, recordMs, difficulty, gapDifficulties, rephrase });
   };
 
   for (const line of lines) {
@@ -55,6 +57,7 @@ export function parseQABlock(fullContent: string): ParsedQA {
       recordMs = null;
       difficulty = null;
       gapDifficulties = undefined;
+      rephrase = false;
     } else if (line.startsWith("A: ")) {
       a = line.slice(3).trim();
     } else if (line.startsWith("Type: ")) {
@@ -69,6 +72,8 @@ export function parseQABlock(fullContent: string): ParsedQA {
       reviewed = line.slice(10).trim() || null;
     } else if (line.startsWith("Suspended: ")) {
       suspended = line.slice(11).trim() === "true";
+    } else if (line.startsWith("Rephrase: ")) {
+      rephrase = line.slice(10).trim() === "true";
     } else if (line.startsWith("Record: ")) {
       const val = parseInt(line.slice(8).trim(), 10);
       if (!isNaN(val)) recordMs = val;
@@ -139,6 +144,7 @@ function mergeVariants(a: QAVariant, b: QAVariant): QAVariant {
     recordMs,
     difficulty: primary.difficulty ?? secondary.difficulty,
     gapDifficulties,
+    rephrase: primary.rephrase || secondary.rephrase,
   };
 }
 
@@ -151,6 +157,7 @@ export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[
     const omitAnswer = v.exerciseType === "Cloze"
       || v.exerciseType === "Pairs"
       || v.exerciseType === "Multi-step"
+      || v.exerciseType === "Match"
       || ((v.exerciseType === "True/False" || v.exerciseType === "Word") && !v.answer);
     let entry = omitAnswer
       ? `Q: ${v.question}`
@@ -169,6 +176,9 @@ export function buildQABlock(variants: QAVariant[], eligibleTypes: ExerciseType[
     }
     if (v.suspended) {
       entry += `\nSuspended: true`;
+    }
+    if (v.rephrase) {
+      entry += `\nRephrase: true`;
     }
     if (v.recordMs != null) {
       entry += `\nRecord: ${v.recordMs}`;

@@ -14,6 +14,7 @@ export const EXERCISE_TYPES = [
   "Word",
   "Pairs",
   "Multi-step",
+  "Match",
 ] as const;
 
 export type ExerciseType = (typeof EXERCISE_TYPES)[number];
@@ -35,6 +36,13 @@ export interface QAVariant {
    * harder gaps are occluded more often. Absent for single-answer types.
    */
   gapDifficulties?: Record<string, number>;
+  /**
+   * Set when the learner answered this variant by cheating (recognizing the
+   * phrasing rather than recalling the fact) or by reflex. The question needs
+   * rewriting from a different angle before it's asked again; cleared once the
+   * rewrite lands.
+   */
+  rephrase?: boolean;
 }
 
 export interface ParsedQA {

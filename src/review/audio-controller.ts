@@ -44,6 +44,33 @@ import { normalizeAnswer } from "../utils/text";
 import { aiEnabled } from "../ai";
 import { markAnswer } from "../generators/qa";
 
+/**
+ * An explicit give-up ("I don't know", "pass"). Matched against the whole
+ * utterance (after stripping leading fillers), never as a substring — "I don't
+ * know, maybe Artemis?" is an attempt and still goes to marking. Give-ups skip
+ * the LLM judge (there's nothing to judge) and skip the spoken "Incorrect." —
+ * the reviewer goes straight to the answer.
+ */
+const GIVE_UP_PHRASES = new Set([
+  "i dont know", "dont know", "i dunno", "dunno", "no idea", "i have no idea",
+  "no clue", "not a clue", "i dont remember", "i cant remember", "cant remember",
+  "i forget", "i forgot", "i give up", "give up", "pass", "skip", "skip it",
+]);
+
+function isGiveUp(spoken: string): boolean {
+  const normalized = spoken
+    .toLowerCase()
+    .replace(/['']/g, "")
+    .replace(/[^a-z ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (GIVE_UP_PHRASES.has(normalized)) return true;
+  // Also accept with leading fillers stripped ("um, no, I don't know"). Checked
+  // second so phrases that *start* with a filler word ("no idea") match above.
+  const stripped = normalized.replace(/^((um|uh|er|hmm|well|oh|no|yeah)\s+)+/, "");
+  return GIVE_UP_PHRASES.has(stripped);
+}
+
 type AudioState =
   | "idle"
   | "speaking-question"
@@ -229,8 +256,13 @@ export class AudioReviewController {
       if (spoken.trim()) break;
     }
 
-    // Evaluate answer
-    const result = await this.evaluateAnswer(spoken, variant);
+    // Evaluate answer. An explicit give-up is wrong by definition — no LLM
+    // judgment needed, and no "Incorrect." announcement either (hearing
+    // "Incorrect" after saying "I don't know" is grating); we go straight to
+    // speaking the answer. Guard: if the card's accepted answer IS a give-up
+    // phrase ("pass", "skip"), the exact match wins.
+    const gaveUp = isGiveUp(spoken) && !this.matchesAccepted(spoken, variant);
+    const result = gaveUp ? { correct: false } : await this.evaluateAnswer(spoken, variant);
 
     if (this.aborted) return;
 
@@ -249,11 +281,13 @@ export class AudioReviewController {
     // we need the current card's speech to be fully done first or the two
     // cards' TTS will overlap on the same AudioContext.
     this.setState("speaking-result");
-    const resultText = result.correct ? correctText : "Incorrect.";
-    this.setStatus(resultText);
-    try {
-      await this.speakText(resultText);
-    } catch { /* non-fatal */ }
+    if (!gaveUp) {
+      const resultText = result.correct ? correctText : "Incorrect.";
+      this.setStatus(resultText);
+      try {
+        await this.speakText(resultText);
+      } catch { /* non-fatal */ }
+    }
 
     if (this.aborted) return;
 
@@ -693,11 +727,16 @@ export class AudioReviewController {
 
   // ─── Answer Evaluation ────────────────────────────────────────────
 
+  /** True when the utterance matches the answer or an accepted alternative verbatim. */
+  private matchesAccepted(spoken: string, variant: QAVariant): boolean {
+    const normalized = normalizeAnswer(spoken);
+    return [variant.answer, ...variant.acceptedAnswers]
+      .some(a => normalizeAnswer(a) === normalized);
+  }
+
   /** Q&A marking: exact/accepted match first, then optional LLM fallback. */
   private async evaluateAnswer(spoken: string, variant: QAVariant): Promise<{ correct: boolean }> {
-    const normalized = normalizeAnswer(spoken);
-    const allAccepted = [variant.answer, ...variant.acceptedAnswers];
-    if (allAccepted.some(a => normalizeAnswer(a) === normalized)) {
+    if (this.matchesAccepted(spoken, variant)) {
       return { correct: true };
     }
     // Gate on aiEnabled, not llmMarkingEnabled: autoMark is the *typed-answer*
@@ -706,14 +745,17 @@ export class AudioReviewController {
     // answer is wrong. aiEnabled covers backend availability (local key OR
     // relay); markAnswer routes through the relay when mounted, so an empty
     // local key must not disable marking.
-    const apiKey = this.plugin.settings.anthropicApiKey;
-    if (aiEnabled(this.plugin)) {
-      // The audio flow has no UI to surface a marking error, so a failure
-      // throws and propagates to the view's catch.
-      const mark = await markAnswer(variant.question, variant.answer, spoken, apiKey, this.plugin.settings.claudeModel);
-      if (!mark.ok) throw new Error(mark.error);
-      return { correct: mark.value };
+    if (!aiEnabled(this.plugin)) {
+      // No AI backend means every non-verbatim spoken answer would be silently
+      // marked wrong. Stop the review (the view's catch surfaces it) instead.
+      throw new Error("AI marking unavailable — enable AI features and configure an API key or the Iris Router.");
     }
-    return { correct: false };
+    const apiKey = this.plugin.settings.anthropicApiKey;
+    // The audio flow has no UI to surface a marking error, so a failure
+    // throws and propagates to the view's catch. skipNLI: spoken answers must
+    // always get the LLM judge — see markAnswer.
+    const mark = await markAnswer(variant.question, variant.answer, spoken, apiKey, this.plugin.settings.claudeModel, { skipNLI: true });
+    if (!mark.ok) throw new Error(mark.error);
+    return { correct: mark.value };
   }
 }

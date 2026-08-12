@@ -50,13 +50,17 @@ export function encodeMC(mc: MCResult): { question: string; answer: string } {
   };
 }
 
-/** Decode stored MC fields back into structured data. */
+/**
+ * Decode stored MC fields back into structured data. The AI generator makes
+ * four options, but hand-authored cards can have any number (see the "mc" type
+ * in card-author.ts), so any letter is accepted here.
+ */
 export function decodeMC(question: string, answer: string): MCResult {
   const lines = question.split("\n");
   const stem = lines[0];
   const options: { letter: string; text: string }[] = [];
   for (const line of lines.slice(1)) {
-    const m = line.match(/^([A-D])\.\s+(.+)$/);
+    const m = line.match(/^([A-Z])\.\s+(.+)$/);
     if (m) options.push({ letter: m[1], text: m[2] });
   }
   return { question: stem, options, correct: answer };

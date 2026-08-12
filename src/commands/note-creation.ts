@@ -1,13 +1,12 @@
-import { Editor, MarkdownView, MarkdownFileInfo, Modal, SuggestModal, TFile, Notice } from "obsidian";
+import { Editor, MarkdownView, MarkdownFileInfo, Modal, TFile, Notice } from "obsidian";
 import { stripMarkdown } from "./utils";
 import type IrisCardsPlugin from "../main";
 import { ImageOcclusionEditor } from "../widgets/image-occlusion-editor";
+import { ImageSuggestModal, IMAGE_EXTS } from "../widgets/image-suggest";
 import { encodeImageOcclusion, extractImagePath, type OcclusionRegion } from "../types/image-occlusion";
 import { buildQABlock } from "../types/qa-block";
 import { buildCardAuthorForm, type AuthoredCard } from "../review/card-author";
 import { getGroupOrders } from "../scheduler";
-
-const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 
 // Toast that, when clicked, opens the card it announces.
 function notifyCardSaved(plugin: IrisCardsPlugin, file: TFile, message = "You'll be quizzed on this."): void {
@@ -256,26 +255,6 @@ export async function makeFlashcard(
 
 // ─── Image Occlusion ────────────────────────────────────────────────
 
-class ImageSuggestModal extends SuggestModal<TFile> {
-  private files: TFile[];
-  constructor(plugin: IrisCardsPlugin, private onPick: (file: TFile) => void) {
-    super(plugin.app);
-    this.files = plugin.app.vault.getFiles().filter(f => IMAGE_EXTS.has(f.extension.toLowerCase()));
-    this.setPlaceholder("Pick an image…");
-  }
-  getSuggestions(query: string): TFile[] {
-    const q = query.toLowerCase();
-    return this.files.filter(f => f.path.toLowerCase().includes(q)).slice(0, 50);
-  }
-  renderSuggestion(file: TFile, el: HTMLElement): void {
-    el.createDiv({ text: file.name });
-    el.createDiv({ text: file.path, cls: "iris-suggest-path" });
-  }
-  onChooseSuggestion(file: TFile): void {
-    this.onPick(file);
-  }
-}
-
 function findImageInSelection(plugin: IrisCardsPlugin, editor: Editor, ctxFile: TFile | null): TFile | null {
   // Prefer the selection; fall back to the cursor's line, since clicking an
   // image embed in Live Preview selects the widget without selecting any text.
@@ -337,7 +316,7 @@ export async function createImageOcclusionCard(plugin: IrisCardsPlugin): Promise
   }
 
   // 3) Fall back to file picker
-  new ImageSuggestModal(plugin, (file) => {
+  new ImageSuggestModal(plugin.app, (file) => {
     void openOcclusionEditorForImage(plugin, file);
   }).open();
 }
@@ -401,6 +380,7 @@ class ManualCardModal extends Modal {
     const host = this.contentEl.createDiv();
     buildCardAuthorForm(host, {
       app: this.plugin.app,
+      plugin: this.plugin,
       saveLabel: "Create card",
       initialTypeId: this.plugin.settings.authorLastType,
       onTypeChange: (id) => void this.plugin.updateSetting("authorLastType", id),

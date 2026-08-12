@@ -34,6 +34,9 @@ export class ImageOcclusionEditor extends Modal {
     private imageFile: TFile,
     initial: OcclusionRegion[],
     private onSave: (regions: OcclusionRegion[]) => void | Promise<void>,
+    /** Overrides the commit button's label — the author form hands regions back
+     * to a form that saves the card itself, so "Save card" would be a lie. */
+    private saveLabel = "Save card",
   ) {
     super(app);
     for (const r of initial) this.regions.push({ ...r, key: this.nextKey++ });
@@ -107,7 +110,7 @@ export class ImageOcclusionEditor extends Modal {
     const footer = contentEl.createDiv({ cls: "iris-occlusion-editor-footer" });
     const cancelBtn = footer.createEl("button", { text: "Cancel" });
     cancelBtn.addEventListener("click", () => this.close());
-    const saveBtn = footer.createEl("button", { cls: "mod-cta", text: "Save card" });
+    const saveBtn = footer.createEl("button", { cls: "mod-cta", text: this.saveLabel });
     saveBtn.addEventListener("click", async () => {
       const cleaned = this.regions
         .filter(r => r.w >= MIN_SIZE && r.h >= MIN_SIZE && r.label.trim().length > 0)

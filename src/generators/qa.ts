@@ -89,6 +89,13 @@ export async function markAnswer(
   userAnswer: string,
   apiKey: string,
   model: string,
+  opts?: {
+    /** Skip the HF NLI shortcut and always use the LLM judge. The audio flow
+     *  sets this: NLI thresholds are tuned expecting the typed view's appeal
+     *  pathway, which spoken answers don't have — and noisy STT transcripts
+     *  fail entailment on phrasing alone. */
+    skipNLI?: boolean;
+  },
 ): Promise<MarkResult<boolean>> {
   try {
     // When no canonical answer is provided (e.g. Correct the Mistake), skip NLI
@@ -108,7 +115,7 @@ export async function markAnswer(
     // on partial answers and verbose answers alike, but flag any direction that
     // looks like an outright contradiction.
     const relay = getRelay();
-    if (relay?.isHFConfigured?.() && userAnswer) {
+    if (!opts?.skipNLI && relay?.isHFConfigured?.() && userAnswer) {
       try {
         const [forward, backward] = await Promise.all([
           relay.nli(userAnswer, correctAnswer, { callerId: "iris-cards:mark" }),
