@@ -375,11 +375,23 @@ function elapsedDays(lastReviewed: string | null, offsetDays = 0): number {
   return Math.max(0, (Date.now() + offsetDays * MS_PER_DAY - new Date(lastReviewed).getTime()) / MS_PER_DAY);
 }
 
-function forEachCard(app: App, cardsFolder: string, fn: (file: TFile, fm: Record<string, unknown> | undefined) => void): void {
+/**
+ * A file Obsidian Sync left behind when the same card was edited on two
+ * devices. It's a fork of a real card, not a card of its own: reviewing it
+ * schedules a phantom duplicate and writes yet another divergent history.
+ * Keep them out of every scan — `Check card health` reports them so they can
+ * be merged back deliberately.
+ */
+export function isConflictedCopy(file: TFile): boolean {
+  return /\(Conflicted copy /i.test(file.basename);
+}
+
+export function forEachCard(app: App, cardsFolder: string, fn: (file: TFile, fm: Record<string, unknown> | undefined) => void): void {
   const folder = app.vault.getAbstractFileByPath(cardsFolder);
   if (!folder || !(folder instanceof TFolder)) return;
   for (const child of folder.children) {
     if (!(child instanceof TFile) || child.extension !== "md") continue;
+    if (isConflictedCopy(child)) continue;
     const cache = app.metadataCache.getFileCache(child);
     if (!cache) continue;
     // ai-selected cards are excluded everywhere — no filter setting reveals
@@ -456,6 +468,10 @@ function getModuleDisplayName(file: TFile, fm: Record<string, unknown>, code: st
   return stripped || base || code;
 }
 
+/** How long a freshly written card sits out of the due queue before its first
+ * review. Long enough that the wording isn't still in working memory. */
+export const NEW_CARD_COOLDOWN_MS = 10 * 60 * 1000;
+
 export function getDueCards(app: App, cardsFolder: string, offsetDays = 0, moduleFilter?: Set<string>, desiredRetention = 0.9, noteFilter?: string): TFile[] {
   const scored: { file: TFile; overdueRatio: number }[] = [];
   forEachCard(app, cardsFolder, (file, fm) => {
@@ -472,6 +488,12 @@ export function getDueCards(app: App, cardsFolder: string, offsetDays = 0, modul
     const lastReviewed = (fm?.["last-reviewed"] as string) ?? null;
     const dt = elapsedDays(lastReviewed, offsetDays);
     if (!isFinite(dt)) {
+      // Never reviewed — normally the front of the queue. Hold a card back for
+      // a short while after it's written: being asked a question you typed a
+      // minute ago tests short-term memory, not recall. Infinite/practice mode
+      // (getAllCards) deliberately ignores this.
+      // offsetDays is honoured so day-ahead forecasts still count the card.
+      if (Date.now() + offsetDays * MS_PER_DAY - file.stat.ctime < NEW_CARD_COOLDOWN_MS) return;
       scored.push({ file, overdueRatio: Infinity });
       return;
     }

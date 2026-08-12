@@ -72,13 +72,19 @@ export class CardStore {
     file: TFile,
     updater: (variants: QAVariant[], eligible: ExerciseType[]) => void,
   ): Promise<QAVariant[]> {
-    const content = await this.app.vault.read(file);
-    const parsed = parseQABlock(content);
-    const variants = dedupeVariants(parsed.variants);
-    updater(variants, parsed.eligibleTypes);
-    const final = dedupeVariants(variants);
-    const stripped = stripQABlock(content);
-    await this.app.vault.modify(file, stripped.trimEnd() + buildQABlock(final, parsed.eligibleTypes));
+    let final: QAVariant[] = [];
+    // `process` is a read-modify-write against the file as it is at write time.
+    // A plain read followed by a modify writes back a snapshot: anything that
+    // landed in between — a version Sync pulled from the phone mid-review — is
+    // overwritten without trace, which is how one card ends up with two
+    // divergent review histories.
+    await this.app.vault.process(file, (content) => {
+      const parsed = parseQABlock(content);
+      const variants = dedupeVariants(parsed.variants);
+      updater(variants, parsed.eligibleTypes);
+      final = dedupeVariants(variants);
+      return stripQABlock(content).trimEnd() + buildQABlock(final, parsed.eligibleTypes);
+    });
     return final;
   }
 
@@ -365,6 +371,18 @@ export class CardStore {
       });
     }
     return remaining;
+  }
+
+  /**
+   * Mark a variant as needing a rewrite (the review "Cheated" button). The flag
+   * lives on the card so it outlives the session: the rewrite itself needs the
+   * LLM, and it should still happen if that call fails or AI is off right now.
+   */
+  async flagRephrase(file: TFile, questionText: string): Promise<void> {
+    await this.updateVariants(file, (variants) => {
+      const idx = variants.findIndex(v => v.question.trim() === questionText.trim());
+      if (idx !== -1) variants[idx] = { ...variants[idx], rephrase: true };
+    });
   }
 
   /** Strip Q&A blocks from all due cards (cache clear). */

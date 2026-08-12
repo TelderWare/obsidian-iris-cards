@@ -19,6 +19,7 @@ import { setRelayApp } from "./api/client";
 import { encryptSecret, decryptSecret } from "./commands/utils";
 import { PregenManager } from "./commands/pregeneration";
 import { makeFlashcard, createImageOcclusionCard, createCardManually } from "./commands/note-creation";
+import { checkAndRepairDueDates } from "./commands/due-date-audit";
 import { buildIrisCardsHomepageWidgets } from "./widgets/homepage-widget";
 import { syncFlashcardTask } from "./tasks-bridge";
 
@@ -122,6 +123,12 @@ export default class IrisCardsPlugin extends Plugin {
       id: "optimize-fsrs-weights",
       name: "Optimize FSRS scheduler weights",
       callback: () => this.optimizeFSRSWeights(),
+    });
+
+    this.addCommand({
+      id: "check-due-dates",
+      name: "Check card health",
+      callback: () => void checkAndRepairDueDates(this),
     });
 
     this.ribbonIconEl = this.addRibbonIcon("loader", "Cards", () => {
