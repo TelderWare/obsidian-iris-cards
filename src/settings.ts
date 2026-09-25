@@ -1,8 +1,8 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, DropdownComponent, Notice, PluginSettingTab, Setting } from "obsidian";
 import type IrisCardsPlugin from "./main";
 import { collectCardLogs, countSamples, optimizeFSRS } from "./fsrs-optimizer";
 import { setFSRSWeights, LEITNER_INTERVALS } from "./scheduler";
-import { fetchVoices, type ElevenLabsVoice } from "./api/elevenlabs";
+import { describeVoice, elevenLabsTTS, fetchVoices, type ElevenLabsVoice } from "./api/elevenlabs";
 
 export type BadgePosition = "top-right" | "top-left" | "bottom-right" | "bottom-left" | "off";
 export type SchedulerAlgorithm = "fsrs" | "leitner";
@@ -89,8 +89,14 @@ export const FSRS_MIN_SAMPLES = 500;
 // to the current count, it won't re-trigger until another batch accrues.
 export const FSRS_AUTO_REFIT_NEW_SAMPLES = 200;
 
+const VOICE_PREVIEW_TEXT = "Here's how your review questions will sound.";
+
 export class IrisCardsSettingTab extends PluginSettingTab {
   plugin: IrisCardsPlugin;
+  // Kept across re-renders so toggling a setting doesn't refetch the voice list.
+  private cachedVoices: ElevenLabsVoice[] | null = null;
+  private previewAudio: HTMLAudioElement | null = null;
+  private previewUrl: string | null = null;
 
   constructor(app: App, plugin: IrisCardsPlugin) {
     super(app, plugin);
@@ -191,42 +197,138 @@ export class IrisCardsSettingTab extends PluginSettingTab {
         t.setPlaceholder("xi-...").setValue(s.elevenLabsApiKey).onChange(async (v) => { s.elevenLabsApiKey = v.trim(); await save(); });
       });
 
-      {
-        const voiceSetting = new Setting(containerEl).setName("Voice").setDesc("ElevenLabs voice for reading questions.");
-        let cachedVoices: ElevenLabsVoice[] | null = null;
-        voiceSetting.addDropdown(d => {
-          if (s.elevenLabsVoiceId) {
-            d.addOption(s.elevenLabsVoiceId, s.elevenLabsVoiceId);
-          }
-          d.setValue(s.elevenLabsVoiceId);
-          d.onChange(async (v) => { s.elevenLabsVoiceId = v; await save(); });
-          d.selectEl.addEventListener("focus", async () => {
-            if (cachedVoices) return;
-            const relay = (this.plugin.app as any).irisRelay;
-            const useRelay = relay?.isElevenLabsConfigured?.();
-            if (!useRelay && !s.elevenLabsApiKey) return;
-            try {
-              const voices: ElevenLabsVoice[] = useRelay
-                ? await relay.elevenLabsVoices({ callerId: "iris-cards:settings" })
-                : await fetchVoices(s.elevenLabsApiKey);
-              cachedVoices = voices;
-              const current = d.getValue();
-              d.selectEl.empty();
-              d.addOption("", "— select —");
-              for (const v of voices) d.addOption(v.voice_id, v.name);
-              d.setValue(current);
-            } catch {
-              new Notice("Failed to load ElevenLabs voices. Check your API key.");
-            }
-          }, { once: true });
-        });
-      }
+      this.renderVoiceSetting(containerEl);
 
       new Setting(containerEl).setName("Auto-advance delay").setDesc("Milliseconds to wait after feedback before showing the next card.").addSlider(sl =>
         sl.setLimits(1000, 5000, 500).setValue(s.audioAutoAdvanceMs).setDynamicTooltip().onChange(async (v) => { s.audioAutoAdvanceMs = v; await save(); }));
 
       new Setting(containerEl).setName("Silence threshold").setDesc("Milliseconds of silence before recording stops automatically.").addSlider(sl =>
         sl.setLimits(1000, 3000, 250).setValue(s.audioSilenceMs).setDynamicTooltip().onChange(async (v) => { s.audioSilenceMs = v; await save(); }));
+    }
+  }
+
+  hide(): void {
+    this.stopPreview();
+  }
+
+  private renderVoiceSetting(containerEl: HTMLElement): void {
+    const s = this.plugin.settings;
+    const relay = (this.plugin.app as any).irisRelay;
+    const useRelay = !!relay?.isElevenLabsConfigured?.();
+    const canLoad = useRelay || !!s.elevenLabsApiKey;
+
+    const voiceSetting = new Setting(containerEl).setName("Voice");
+    let dropdown: DropdownComponent | null = null;
+
+    // The description always states which voice audio review will use.
+    const updateDesc = (status?: string) => {
+      const id = s.elevenLabsVoiceId;
+      const voice = this.cachedVoices?.find(v => v.voice_id === id);
+      voiceSetting.descEl.empty();
+      voiceSetting.descEl.appendText("ElevenLabs voice for reading questions.");
+      voiceSetting.descEl.createEl("br");
+      if (status) {
+        voiceSetting.descEl.appendText(status);
+      } else if (!id) {
+        voiceSetting.descEl.appendText("No voice selected — audio review won't run until you pick one.");
+      } else if (voice) {
+        const summary = describeVoice(voice);
+        voiceSetting.descEl.appendText(`Using ${voice.name}${summary ? ` (${summary})` : ""}.`);
+        if (voice.description) {
+          voiceSetting.descEl.createEl("br");
+          voiceSetting.descEl.appendText(voice.description);
+        }
+      } else if (this.cachedVoices) {
+        voiceSetting.descEl.appendText(`Voice ${id} isn't in your ElevenLabs library — pick another.`);
+      } else {
+        voiceSetting.descEl.appendText(`Using voice ID ${id}.`);
+      }
+    };
+
+    const fillOptions = () => {
+      if (!dropdown) return;
+      const d = dropdown;
+      const current = s.elevenLabsVoiceId;
+      d.selectEl.empty();
+      d.addOption("", "— select —");
+      if (this.cachedVoices) {
+        for (const v of this.cachedVoices) {
+          const summary = describeVoice(v);
+          d.addOption(v.voice_id, summary ? `${v.name} — ${summary}` : v.name);
+        }
+      }
+      if (current && !this.cachedVoices?.some(v => v.voice_id === current)) {
+        d.addOption(current, this.cachedVoices ? `Unavailable (${current})` : `Voice ID ${current}`);
+      }
+      d.setValue(current);
+    };
+
+    const loadVoices = async () => {
+      if (this.cachedVoices || !canLoad) return;
+      updateDesc("Loading voices…");
+      try {
+        this.cachedVoices = useRelay
+          ? await relay.elevenLabsVoices({ callerId: "iris-cards:settings" })
+          : await fetchVoices(s.elevenLabsApiKey);
+        fillOptions();
+        updateDesc();
+      } catch {
+        updateDesc("Couldn't load ElevenLabs voices. Check your API key.");
+      }
+    };
+
+    voiceSetting.addDropdown(d => {
+      dropdown = d;
+      d.onChange(async (v) => {
+        s.elevenLabsVoiceId = v;
+        await this.plugin.saveSettings();
+        this.stopPreview();
+        updateDesc();
+      });
+    });
+    voiceSetting.addExtraButton(b => b
+      .setIcon("play")
+      .setTooltip("Preview voice")
+      .onClick(() => void this.previewVoice(useRelay ? relay : null)));
+
+    fillOptions();
+    updateDesc(canLoad ? undefined : "Add an ElevenLabs API key to see available voices.");
+    void loadVoices();
+  }
+
+  /** Speak a sample with the selected voice, the same way audio review does. */
+  private async previewVoice(relay: any): Promise<void> {
+    const s = this.plugin.settings;
+    this.stopPreview();
+    if (!s.elevenLabsVoiceId) {
+      new Notice("Pick a voice first.");
+      return;
+    }
+    if (!relay && !s.elevenLabsApiKey) {
+      new Notice("Add an ElevenLabs API key first.");
+      return;
+    }
+    try {
+      const encoded: ArrayBuffer = relay
+        ? await relay.elevenLabsTTS(VOICE_PREVIEW_TEXT, s.elevenLabsVoiceId, { callerId: "iris-cards:settings" })
+        : await elevenLabsTTS(VOICE_PREVIEW_TEXT, s.elevenLabsApiKey, s.elevenLabsVoiceId);
+      this.stopPreview();
+      this.previewUrl = URL.createObjectURL(new Blob([encoded], { type: "audio/mpeg" }));
+      this.previewAudio = new Audio(this.previewUrl);
+      this.previewAudio.onended = () => this.stopPreview();
+      await this.previewAudio.play();
+    } catch (e) {
+      new Notice(`Voice preview failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.stopPreview();
+    }
+  }
+
+  private stopPreview(): void {
+    this.previewAudio?.pause();
+    this.previewAudio = null;
+    if (this.previewUrl) {
+      URL.revokeObjectURL(this.previewUrl);
+      this.previewUrl = null;
     }
   }
 
