@@ -132,6 +132,10 @@ export class AudioReviewController {
     return this.plugin.settings.elevenLabsVoiceId;
   }
 
+  private get modelId(): string {
+    return this.plugin.settings.elevenLabsModel;
+  }
+
   private getAudioCtx(): AudioContext {
     if (!this.audioCtx) {
       const Ctx = (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext);
@@ -347,9 +351,10 @@ export class AudioReviewController {
     }
 
     // Relay proxies the non-streaming endpoint; it has no ReadableStream
-    // surface. Fall back to fetch-then-decode for that path.
+    // surface. Fall back to fetch-then-decode for that path. v3 isn't offered
+    // on the low-latency streaming endpoint, so it takes the same path.
     const relay = getRelay(this.plugin);
-    if (relay) {
+    if (relay || this.modelId === "eleven_v3") {
       const buf = await this.getDecodedTTS(text);
       return this.playAudioBuffer(buf);
     }
@@ -399,7 +404,7 @@ export class AudioReviewController {
     };
 
     try {
-      await elevenLabsTTSStream(text, this.apiKey, this.voiceId, onSamples, { signal: abort.signal });
+      await elevenLabsTTSStream(text, this.apiKey, this.voiceId, onSamples, { signal: abort.signal, modelId: this.modelId });
     } catch (e) {
       try { gain.disconnect(); } catch { /* */ }
       if (this.currentStreamGain === gain) this.currentStreamGain = null;
@@ -472,8 +477,8 @@ export class AudioReviewController {
       try {
         const relay = getRelay(this.plugin);
         const encoded: ArrayBuffer = relay
-          ? await relay.elevenLabsTTS(text, this.voiceId, { callerId: "iris-cards:tts" })
-          : await elevenLabsTTS(text, this.apiKey, this.voiceId);
+          ? await relay.elevenLabsTTS(text, this.voiceId, { callerId: "iris-cards:tts", modelId: this.modelId })
+          : await elevenLabsTTS(text, this.apiKey, this.voiceId, this.modelId);
         // decodeAudioData transfers the buffer; pass the original since we don't reuse it.
         const decoded = await ctx.decodeAudioData(encoded.slice(0));
         const entry = this.ttsCache.get(text);

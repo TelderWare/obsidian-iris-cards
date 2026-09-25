@@ -6,6 +6,7 @@ import { describeVoice, elevenLabsTTS, fetchVoices, type ElevenLabsVoice } from 
 
 export type BadgePosition = "top-right" | "top-left" | "bottom-right" | "bottom-left" | "off";
 export type SchedulerAlgorithm = "fsrs" | "leitner";
+export type ElevenLabsModel = "eleven_flash_v2_5" | "eleven_turbo_v2_5" | "eleven_multilingual_v2" | "eleven_v3";
 
 export interface IrisCardsSettings {
   // Cards
@@ -27,6 +28,9 @@ export interface IrisCardsSettings {
   // Audio review
   elevenLabsApiKey: string;
   elevenLabsVoiceId: string;
+  // One model for every TTS path (streaming, prefetch, relay, preview) so the
+  // chosen voice always sounds the same.
+  elevenLabsModel: ElevenLabsModel;
   audioAutoAdvanceMs: number;
   audioSilenceMs: number;
   // FSRS optimizer — null means use the built-in defaults.
@@ -65,6 +69,7 @@ export const DEFAULT_SETTINGS: IrisCardsSettings = {
   desiredRetention: 0.9,
   elevenLabsApiKey: "",
   elevenLabsVoiceId: "",
+  elevenLabsModel: "eleven_flash_v2_5",
   audioAutoAdvanceMs: 2000,
   audioSilenceMs: 1500,
   fsrsWeights: null,
@@ -199,6 +204,13 @@ export class IrisCardsSettingTab extends PluginSettingTab {
 
       this.renderVoiceSetting(containerEl);
 
+      new Setting(containerEl).setName("Voice model").setDesc("ElevenLabs model used to read questions. Flash starts speaking fastest; v3 sounds most natural but is slower.").addDropdown(d =>
+        d.addOption("eleven_flash_v2_5", "Flash v2.5 (fastest)")
+          .addOption("eleven_turbo_v2_5", "Turbo v2.5")
+          .addOption("eleven_multilingual_v2", "Multilingual v2")
+          .addOption("eleven_v3", "v3 (most expressive, slowest)")
+          .setValue(s.elevenLabsModel).onChange(async (v) => { s.elevenLabsModel = v as ElevenLabsModel; await save(); }));
+
       new Setting(containerEl).setName("Auto-advance delay").setDesc("Milliseconds to wait after feedback before showing the next card.").addSlider(sl =>
         sl.setLimits(1000, 5000, 500).setValue(s.audioAutoAdvanceMs).setDynamicTooltip().onChange(async (v) => { s.audioAutoAdvanceMs = v; await save(); }));
 
@@ -296,7 +308,7 @@ export class IrisCardsSettingTab extends PluginSettingTab {
     void loadVoices();
   }
 
-  /** Speak a sample with the selected voice, the same way audio review does. */
+  /** Speak a sample with the selected voice and model, the same way audio review does. */
   private async previewVoice(relay: any): Promise<void> {
     const s = this.plugin.settings;
     this.stopPreview();
@@ -310,8 +322,8 @@ export class IrisCardsSettingTab extends PluginSettingTab {
     }
     try {
       const encoded: ArrayBuffer = relay
-        ? await relay.elevenLabsTTS(VOICE_PREVIEW_TEXT, s.elevenLabsVoiceId, { callerId: "iris-cards:settings" })
-        : await elevenLabsTTS(VOICE_PREVIEW_TEXT, s.elevenLabsApiKey, s.elevenLabsVoiceId);
+        ? await relay.elevenLabsTTS(VOICE_PREVIEW_TEXT, s.elevenLabsVoiceId, { callerId: "iris-cards:settings", modelId: s.elevenLabsModel })
+        : await elevenLabsTTS(VOICE_PREVIEW_TEXT, s.elevenLabsApiKey, s.elevenLabsVoiceId, s.elevenLabsModel);
       this.stopPreview();
       this.previewUrl = URL.createObjectURL(new Blob([encoded], { type: "audio/mpeg" }));
       this.previewAudio = new Audio(this.previewUrl);
