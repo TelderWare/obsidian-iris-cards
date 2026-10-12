@@ -1,13 +1,17 @@
 /**
- * Pairs — a multi-sided card the user authors by hand. Each side has a
- * user-chosen field name ("structure", "name", "function", "three-letter
- * code", …) and markdown content. A presentation shows one side and asks the
- * learner to recall another; with 3+ sides each review picks a fresh pairing.
+ * Pairs (shown as "Double-sided") — a multi-sided card the user authors by
+ * hand. Each side has markdown content and an optional field name
+ * ("structure", "name", "function", "three-letter code", …). A presentation
+ * shows one side and asks the learner to recall another; with 3+ sides each
+ * review picks a fresh pairing. A plain front/back card is just two unnamed
+ * sides.
  *
- * Stored in Q as human-readable lines, one side each — Dataview-style:
+ * Stored in Q as human-readable lines, one side each — Dataview-style, with
+ * an unnamed side written as a bare `::`:
  *
  *   structure:: ![[molecule.png]]
  *   name:: Alanine
+ *   :: Ala
  *
  * `::` can't collide with the QA block's own directives (Type:, Reviewed:, …),
  * which all use a single colon. Newlines inside a side are stored as <br> so
@@ -16,6 +20,7 @@
  */
 
 export interface PairsField {
+  /** Empty for an unnamed side. */
   name: string;
   content: string;
 }
@@ -41,11 +46,11 @@ export function decodePairs(question: string): PairsResult {
 function decodePairsLines(q: string): PairsField[] {
   const fields: PairsField[] = [];
   for (const line of q.split("\n")) {
-    const m = line.match(/^([^:]+?)::\s*(.+)$/);
+    const m = line.match(/^([^:]*?)::\s*(.+)$/);
     if (!m) continue;
     const name = m[1].trim();
     const content = m[2].replace(/<br>/g, "\n").trim();
-    if (name && content) fields.push({ name, content });
+    if (content) fields.push({ name, content });
   }
   return fields;
 }
@@ -60,7 +65,7 @@ function decodePairsLegacyJson(q: string): PairsField[] {
     if (typeof f !== "object" || f === null) continue;
     const name = (f as Record<string, unknown>)["name"];
     const content = (f as Record<string, unknown>)["content"];
-    if (typeof name === "string" && name.trim() && typeof content === "string" && content.trim()) {
+    if (typeof name === "string" && typeof content === "string" && content.trim()) {
       fields.push({ name: name.trim(), content: content.trim() });
     }
   }

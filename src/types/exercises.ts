@@ -50,3 +50,18 @@ export interface ParsedQA {
   eligibleTypes: ExerciseType[];
   variants: QAVariant[];
 }
+
+/**
+ * User-facing names where the stored type name reads wrong. "Synonym" cards
+ * mostly ask for an alternate name (Krebs cycle / citric acid cycle), which
+ * isn't what "synonym" means to most people. "Pairs" is the generic
+ * flip-card (two sides, or more). The stored names stay for the card files.
+ */
+export const EXERCISE_TYPE_LABELS: Partial<Record<ExerciseType, string>> = {
+  "Synonym": "Alternate name",
+  "Pairs": "Double-sided",
+};
+
+export function exerciseTypeLabel(t: ExerciseType): string {
+  return EXERCISE_TYPE_LABELS[t] ?? t;
+}

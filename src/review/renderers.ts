@@ -1706,8 +1706,21 @@ async function renderPairs(a: RenderArgs): Promise<void> {
   // so undo title-casing — but leave acronyms and all-caps words alone.
   const uncap = (s: string) =>
     s.replace(/\b[A-Z][a-z]+\b/g, w => w.charAt(0).toLowerCase() + w.slice(1));
-  const askedLabel = uncap(asked.name);
-  const questionMd = `**${cap(shown.name)}:**\n\n${shown.content}\n\n**What is the ${askedLabel}?**`;
+  const shownMd = shown.name ? `**${cap(shown.name)}:**\n\n${shown.content}` : shown.content;
+  const shownPlain = shown.name ? `${cap(shown.name)}: ${shown.content}` : shown.content;
+
+  // An unnamed side has no field to ask for by name. On a two-sided card
+  // that's simply "the other side"; with more sides there's no telling the
+  // unnamed ones apart, so the learner recalls everything not shown.
+  if (!asked.name && p.fields.length > 2) {
+    const rest = p.fields.filter((_, i) => i !== pick[0]);
+    const restMd = rest.map(f => f.name ? `**${cap(f.name)}:** ${f.content}` : f.content).join("\n\n");
+    await renderManualReveal(a, `${shownMd}\n\n**What's on the other sides?**`, restMd);
+    return;
+  }
+
+  const askPrompt = asked.name ? `What is the ${uncap(asked.name)}?` : "What's on the other side?";
+  const questionMd = `${shownMd}\n\n**${askPrompt}**`;
   const typeable = isTypeableContent(asked.content);
 
   if (typeable && llmMarkingEnabled(view.plugin)) {
@@ -1716,7 +1729,7 @@ async function renderPairs(a: RenderArgs): Promise<void> {
       canonicalAnswer: asked.content,
       autoSubmitOnMatch: true,
       llmMarker: {
-        question: `${cap(shown.name)}: ${shown.content}\nWhat is the ${askedLabel}?`,
+        question: `${shownPlain}\n${askPrompt}`,
         answer: asked.content,
         acceptedAnswers: variant.acceptedAnswers,
       },

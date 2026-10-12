@@ -258,6 +258,59 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     },
   },
   {
+    id: "pairs",
+    label: "Double-sided",
+    build(fields, initial) {
+      const rows: { name: HTMLInputElement; content: HTMLTextAreaElement }[] = [];
+      fields.createDiv({
+        text: "You'll be shown one side and asked for another. Fill in a third row (or more) for extra sides. Naming sides — e.g. \"structure\" / \"name\" — makes the question say what it's asking for. Images can be pasted straight in.",
+        cls: "iris-author-hint",
+      });
+      const rowsEl = fields.createDiv();
+      const wireAutoAdd = autoAddRows(
+        () => rows.map(r => [r.name, r.content]),
+        () => addRow(),
+      );
+      const addRow = () => {
+        const row = rowsEl.createDiv({ cls: "iris-author-pair-row" });
+        const name = row.createEl("input", { type: "text", cls: "iris-author-input iris-author-pair-name" });
+        name.placeholder = "Name (optional)";
+        const content = row.createEl("textarea", { cls: "iris-author-input iris-author-pair-content" });
+        content.rows = 1;
+        content.placeholder = rows.length === 0 ? "Front" : rows.length === 1 ? "Back" : "Another side";
+        rows.push({ name, content });
+        wireAutoAdd([name, content]);
+      };
+      if (initial) {
+        try {
+          for (const f of decodePairs(initial.question).fields) {
+            addRow();
+            const r = rows[rows.length - 1];
+            r.name.value = f.name;
+            r.content.value = f.content;
+          }
+        } catch { /* vetted by editableTypeId; fall through to empty rows */ }
+      }
+      while (rows.length < 2) addRow();
+      if (initial && rows[rows.length - 1].content.value) addRow(); // trailing empty row
+      return () => {
+        const complete: PairsField[] = [];
+        for (const r of rows) {
+          const name = r.name.value.trim();
+          const content = r.content.value.trim();
+          if (content) complete.push({ name, content });
+          else if (name) return `The "${name}" side has no content.`;
+        }
+        if (complete.length < 2) return "A double-sided card needs at least two sides.";
+        const e = encodePairs(complete);
+        return {
+          variant: mkVariant("Pairs", e.question, e.answer),
+          factText: complete.map(f => f.name ? `${f.name}: ${f.content}` : f.content).join("\n"),
+        };
+      };
+    },
+  },
+  {
     id: "cloze",
     label: "Cloze",
     build(fields, initial, ctx) {
@@ -386,59 +439,6 @@ const TYPE_DEFS: AuthorTypeDef[] = [
         if (!sentence) return "A sentence is required.";
         if (parseClozeTerms(sentence).length === 0) return "At least one word needs to be hidden — tap it in the sentence.";
         return { variant: mkVariant("Cloze", sentence, ""), factText: sentence };
-      };
-    },
-  },
-  {
-    id: "pairs",
-    label: "Pairs",
-    build(fields, initial) {
-      const rows: { name: HTMLInputElement; content: HTMLTextAreaElement }[] = [];
-      fields.createDiv({
-        text: "Sides have a name and content — e.g. \"structure\" / \"name\" / \"three-letter code\". Images can be pasted straight in.",
-        cls: "iris-author-hint",
-      });
-      const rowsEl = fields.createDiv();
-      const wireAutoAdd = autoAddRows(
-        () => rows.map(r => [r.name, r.content]),
-        () => addRow(),
-      );
-      const addRow = () => {
-        const row = rowsEl.createDiv({ cls: "iris-author-pair-row" });
-        const name = row.createEl("input", { type: "text", cls: "iris-author-input iris-author-pair-name" });
-        name.placeholder = "Side name (e.g. structure)";
-        const content = row.createEl("textarea", { cls: "iris-author-input iris-author-pair-content" });
-        content.rows = 1;
-        content.placeholder = "Content";
-        rows.push({ name, content });
-        wireAutoAdd([name, content]);
-      };
-      if (initial) {
-        try {
-          for (const f of decodePairs(initial.question).fields) {
-            addRow();
-            const r = rows[rows.length - 1];
-            r.name.value = f.name;
-            r.content.value = f.content;
-          }
-        } catch { /* vetted by editableTypeId; fall through to empty rows */ }
-      }
-      while (rows.length < 2) addRow();
-      if (initial && rows[rows.length - 1].name.value) addRow(); // trailing empty row
-      return () => {
-        const complete: PairsField[] = [];
-        for (const r of rows) {
-          const name = r.name.value.trim();
-          const content = r.content.value.trim();
-          if (name && content) complete.push({ name, content });
-          else if (name || content) return "Every side needs both a name and content (or leave both empty).";
-        }
-        if (complete.length < 2) return "A pairs card needs at least two complete sides.";
-        const e = encodePairs(complete);
-        return {
-          variant: mkVariant("Pairs", e.question, e.answer),
-          factText: complete.map(f => `${f.name}: ${f.content}`).join("\n"),
-        };
       };
     },
   },
