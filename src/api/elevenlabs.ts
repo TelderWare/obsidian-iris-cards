@@ -218,6 +218,20 @@ export async function elevenLabsSTT(
 export interface ElevenLabsVoice {
   voice_id: string;
   name: string;
+  // Optional metadata, used to describe the voice in settings.
+  category?: string;
+  description?: string;
+  labels?: Record<string, string>;
+}
+
+/** Short human-readable summary, e.g. "female, young, American, calm, narration". */
+export function describeVoice(v: ElevenLabsVoice): string {
+  const l = v.labels ?? {};
+  const parts = [l.gender, l.age, l.accent, l.description ?? l.descriptive, l.use_case]
+    .filter((p): p is string => typeof p === "string" && p.trim() !== "")
+    .map(p => p.replace(/_/g, " "));
+  if (v.category && v.category !== "premade") parts.push(v.category);
+  return parts.join(", ");
 }
 
 export async function fetchVoices(apiKey: string): Promise<ElevenLabsVoice[]> {
@@ -231,7 +245,13 @@ export async function fetchVoices(apiKey: string): Promise<ElevenLabsVoice[]> {
     throw new Error(`ElevenLabs voices ${response.status}`);
   }
   const voices: ElevenLabsVoice[] = (response.json?.voices ?? []).map(
-    (v: { voice_id: string; name: string }) => ({ voice_id: v.voice_id, name: v.name }),
+    (v: ElevenLabsVoice) => ({
+      voice_id: v.voice_id,
+      name: v.name,
+      category: v.category,
+      description: v.description,
+      labels: v.labels,
+    }),
   );
   return voices;
 }
