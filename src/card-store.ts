@@ -2,7 +2,7 @@ import { App, type CachedMetadata, TFile, TFolder, getAllTags, normalizePath } f
 import { type QAVariant, type ExerciseType } from "./types/exercises";
 import { parseQABlock, stripQABlock, buildQABlock, dedupeVariants } from "./types/qa-block";
 import { encodeGapAlt, decodeGapAlt } from "./types/gap-alternates";
-import { getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog, initialStability, initialDifficulty, retrievability, daysSince, computeNextDue, getParentNoteName, getLeitnerBox, leitnerNextBox, leitnerDueIso } from "./scheduler";
+import { isEmptyNote, getStability, getDifficulty, updateStability, updateDifficulty, getDueCards, S_INITIAL, buildLogEntry, appendReviewLog, initialStability, initialDifficulty, retrievability, daysSince, computeNextDue, getParentNoteName, getLeitnerBox, leitnerNextBox, leitnerDueIso } from "./scheduler";
 import type { SchedulerAlgorithm } from "./settings";
 import { normalizeAnswer } from "./utils/text";
 
@@ -395,6 +395,40 @@ export class CardStore {
         await this.app.vault.modify(card, stripped);
       }
     }
+  }
+
+  /**
+   * Move empty notes (see isEmptyNote) in the cards folder to the trash. One
+   * that is open in a tab, or was made in the last minute, is left alone: the
+   * card library's New button creates the note and then opens it for typing,
+   * and deleting it in between would yank it out from under the user.
+   * Returns the trashed notes' names.
+   */
+  async trashEmptyNotes(cardsFolder: string): Promise<string[]> {
+    const folder = this.app.vault.getAbstractFileByPath(cardsFolder.trim() || "Iris Cards");
+    if (!(folder instanceof TFolder)) return [];
+    const open = new Set<string>();
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      // getViewState covers tabs restored at startup but not loaded yet,
+      // whose view has no file until they're first shown.
+      const path = leaf.getViewState().state?.["file"];
+      if (typeof path === "string") open.add(path);
+    });
+    const cutoff = Date.now() - 60_000;
+    const trashed: string[] = [];
+    for (const child of [...folder.children]) {
+      if (!(child instanceof TFile) || child.extension !== "md") continue;
+      if (open.has(child.path) || child.stat.ctime > cutoff) continue;
+      // No cache yet means not indexed yet, not empty — never guess.
+      const cache = this.app.metadataCache.getFileCache(child);
+      if (!cache || !isEmptyNote(cache)) continue;
+      // The cache can lag a fresh edit; the file itself has the final say.
+      const content = await this.app.vault.read(child);
+      if (content.replace(/^---[\s\S]*?---/, "").trim()) continue;
+      await this.app.fileManager.trashFile(child);
+      trashed.push(child.basename);
+    }
+    return trashed;
   }
 
   async ensureFolderExists(folderPath: string): Promise<void> {

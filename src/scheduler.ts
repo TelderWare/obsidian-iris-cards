@@ -1,4 +1,4 @@
-import { App, TFile, TFolder } from "obsidian";
+import { App, type CachedMetadata, TFile, TFolder } from "obsidian";
 
 // FSRS-6 default weights (open-spaced-repetition/py-fsrs defaults).
 // Indices:
@@ -386,6 +386,17 @@ export function isConflictedCopy(file: TFile): boolean {
   return /\(Conflicted copy /i.test(file.basename);
 }
 
+/**
+ * A note with nothing past its frontmatter. These turn up when a note is
+ * created in the cards folder by something other than Iris — most often the
+ * card library base's own "New" button, which makes an Untitled note there.
+ * Counted as a card, it would come up in review asking for a question about
+ * nothing.
+ */
+export function isEmptyNote(cache: CachedMetadata): boolean {
+  return !(cache.sections ?? []).some(s => s.type !== "yaml");
+}
+
 export function forEachCard(app: App, cardsFolder: string, fn: (file: TFile, fm: Record<string, unknown> | undefined) => void): void {
   const folder = app.vault.getAbstractFileByPath(cardsFolder);
   if (!folder || !(folder instanceof TFolder)) return;
@@ -397,11 +408,13 @@ export function forEachCard(app: App, cardsFolder: string, fn: (file: TFile, fm:
     // ai-selected cards are excluded everywhere — no filter setting reveals
     // them. They live in the vault but are inert as far as review/listing.
     if (cache.frontmatter?.["ai-selected"]) continue;
-    // Tables (and their state files) are their own data model (see
-    // table-store.ts) — rows schedule through TableStore, never through
-    // the card machinery.
+    // Leftover files from the retired tables feature aren't cards — never
+    // parse one as a card.
     const kind = cache.frontmatter?.["kind"];
     if (kind === "table" || kind === "table-state") continue;
+    // Not a card yet — see isEmptyNote. CardStore.trashEmptyNotes clears
+    // these out once nobody has them open.
+    if (isEmptyNote(cache)) continue;
     fn(child, cache.frontmatter);
   }
 }
@@ -645,6 +658,20 @@ export function getModules(app: App, cardsFolder: string): { code: string; name:
     if (note) out.push({ code, name: getModuleDisplayName(note.file, note.fm, code) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The saved review module filter, narrowed to modules this vault actually
+ * has. Settings carried over from another vault can name modules that don't
+ * exist here; applied as-is they hide every card, and the filter button that
+ * would clear them only appears when there are modules to pick. A filter
+ * with nothing left after narrowing is no filter.
+ */
+export function activeModuleFilter(app: App, cardsFolder: string, saved: Iterable<string>): Set<string> | undefined {
+  const wanted = new Set(saved);
+  if (wanted.size === 0) return undefined;
+  const live = getModules(app, cardsFolder).map(m => m.code).filter(c => wanted.has(c));
+  return live.length > 0 ? new Set(live) : undefined;
 }
 
 // Log format: ISO-8601 timestamp,c|w,elapsedMs   (e.g. 2026-05-04T14:23:45.123Z,c,1832)

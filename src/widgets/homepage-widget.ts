@@ -1,6 +1,7 @@
 import { type App, Component, Menu, TFile, type EventRef } from "obsidian";
 import type IrisCardsPlugin from "../main";
-import { getDueCards, getParentNoteName } from "../scheduler";
+import { activeModuleFilter, getDueCards, getParentNoteName } from "../scheduler";
+import { playFeedbackSound } from "../review/feedback-sound";
 import { llmMarkingEnabled } from "../ai";
 import type { ParsedQA, QAVariant } from "../types/exercises";
 import {
@@ -99,47 +100,13 @@ class WidgetRenderContext extends Component implements RenderContext {
     }
   }
 
-  /**
-   * Oscillator-based tones, matched note-for-note to the full review view
-   * (ReviewView.playChime / playBuzz) so the widget sounds identical.
-   * Correct: two-note rising chime. Incorrect: low square-wave buzz.
-   */
   private playTone(correct: boolean): void {
-    try {
-      if (!this.audioCtx) {
-        const Ctx = window.AudioContext ||
-          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        this.audioCtx = new Ctx();
-      }
-      const ctx = this.audioCtx;
-      const now = ctx.currentTime;
-      if (correct) {
-        for (const [freq, onset, dur] of [[523.25, 0, 0.12], [783.99, 0.06, 0.18]] as const) {
-          const osc = ctx.createOscillator();
-          osc.type = "sine";
-          osc.frequency.value = freq;
-          const g = ctx.createGain();
-          g.gain.setValueAtTime(0.0001, now + onset);
-          g.gain.exponentialRampToValueAtTime(0.18, now + onset + 0.008);
-          g.gain.exponentialRampToValueAtTime(0.0001, now + onset + dur);
-          osc.connect(g).connect(ctx.destination);
-          osc.start(now + onset);
-          osc.stop(now + onset + dur);
-        }
-      } else {
-        const dur = 0.12;
-        const osc = ctx.createOscillator();
-        osc.type = "square";
-        osc.frequency.value = 220;
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.0001, now);
-        gain.gain.exponentialRampToValueAtTime(0.25, now + 0.005);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-        osc.connect(gain).connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + dur);
-      }
-    } catch { /* ignore */ }
+    if (!this.audioCtx) {
+      const Ctx = window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      this.audioCtx = new Ctx();
+    }
+    playFeedbackSound(this.audioCtx, correct);
   }
 }
 
@@ -210,8 +177,7 @@ class ReviewWidget {
   /** Same module filter the badge and review view apply, so the widget queue
    *  matches the badge count. undefined when no filter is active. */
   private moduleFilter(): Set<string> | undefined {
-    const mf = this.plugin.settings.reviewModuleFilter;
-    return mf.length > 0 ? new Set(mf) : undefined;
+    return activeModuleFilter(this.plugin.app, this.plugin.settings.cardsFolder, this.plugin.settings.reviewModuleFilter);
   }
 
   private scheduleReload(): void {

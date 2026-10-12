@@ -168,13 +168,22 @@
   margin-bottom: 60px;
 }
 
-/* The corner icons are pinned to the card's bottom edge. On a desktop-width
-   card they sit far outside the centred action row; on a phone the card is
-   barely wider than the row, so open-file and edit land on top of the end
-   buttons and swallow the tap. Extra bottom padding lifts the row clear of
-   the icon band. */
-.is-mobile .iris-review .iris-card {
-  padding-bottom: 72px;
+/* The navbar leaves the DOM while the keyboard is up, so that reserved strip
+   becomes dead space that hoists the card and its answer controls well
+   above the keyboard. Obsidian keeps --keyboard-height at 0px when closed. */
+.is-mobile .iris-review .iris-scroll-body {
+  margin-bottom: max(0px, 60px - var(--keyboard-height, 0px));
+}
+
+/* With the keyboard open, Obsidian folds the keyboard height into
+   --safe-area-inset-bottom and pads every .view-content by it — while also
+   shrinking the workspace by the same height. Measured on a Pixel 7: a 362px
+   keyboard left the scroll body 132px tall, with the answer input squeezed
+   into (or pushed out of) that strip above a blank band. Obsidian's own
+   markdown view zeroes this padding; the review already ends above the
+   navbar via the margin above, so it needs no extra bottom pad. */
+.is-mobile .workspace-leaf-content .view-content.iris-review {
+  padding-bottom: 12px;
 }
 
 /* Centering spacers removed - each card is a full screen and centers its
@@ -556,10 +565,7 @@ button.iris-card-icon {
 }
 
 .iris-goback-btn { top: 10px; left: 14px; }
-.iris-suspend-btn { top: 10px; left: 14px; }
-.iris-parent-btn { top: 10px; right: 14px; }
-.iris-card-file-btn { bottom: 10px; left: 14px; }
-.iris-appeal-icon { bottom: 38px; left: 14px; }
+.iris-card-menu-btn { top: 10px; right: 14px; }
 
 /* Solve Equation */
 .iris-solve-question {
@@ -860,45 +866,23 @@ button.iris-card-icon {
 /* True/False buttons are uncoloured until answered - the verdict classes
    (.iris-mc-correct / .iris-mc-incorrect) carry the colour. */
 
-/* "Don't know" — a deliberately quieter option on choice cards */
-.iris-mc-option.iris-dont-know {
-  padding: 12px 16px;
-  font-size: 0.95em;
-  font-weight: normal;
-  color: var(--text-muted);
-  border-style: dashed;
-}
-
 .iris-tf-options {
   flex-wrap: wrap;
 }
 
-.iris-tf-options .iris-mc-option.iris-dont-know {
-  flex: 1 1 100%;
-  padding: 12px 16px;
-  font-size: 0.95em;
-  font-weight: normal;
+/* Two quiet outs, rendered the same way: "Don't know" on its own row under the
+   options/input before answering, "Cheated" on its own row under the grades
+   after. Neither is an answer or a grade, so neither takes a place in those
+   rows or their weight. The tighter padding pulls the row up against the one
+   it belongs to. */
+.iris-cheat-row,
+.iris-dont-know-row {
+  padding-top: 4px;
 }
 
-/* On the full review card, "Don't know" is a small corner button, not a
-   full-width row among the real answers. Anchored above the bottom-right edit
-   pencil, sharing the .iris-card-icon corner insets. The homepage widget keeps
-   the in-flow version above (it has no card corners to anchor to). */
-.iris-review .iris-mc-options .iris-dont-know {
-  position: absolute;
-  width: auto;
-  max-width: none;
-  bottom: 40px;
-  right: 14px;
-  margin: 0;
-  padding: 5px 12px;
-  font-size: 0.8em;
-  border-radius: 6px;
-}
-
-/* "Don't know" on typed-input cards — reveal the answer, take the Again */
-button.iris-dont-know-btn {
-  align-self: center;
+button.iris-cheat-btn,
+button.iris-dont-know-btn,
+button.iris-appeal-btn {
   background: transparent;
   border: none;
   box-shadow: none;
@@ -908,29 +892,16 @@ button.iris-dont-know-btn {
   padding: 4px 8px;
 }
 
-button.iris-dont-know-btn:hover {
+button.iris-cheat-btn:hover,
+button.iris-dont-know-btn:hover,
+button.iris-appeal-btn:hover {
   color: var(--text-muted);
   text-decoration: underline;
 }
 
-/* "Cheated" sits in the post-answer action row but isn't a grade — keep it
-   quiet so it never competes with Hard/Medium/Easy for the eye. */
-button.iris-cheat-btn {
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  color: var(--text-faint);
-  font-size: 0.85em;
-  cursor: pointer;
-  padding: 4px 8px;
-}
-
-button.iris-cheat-btn:hover {
-  color: var(--text-muted);
-  text-decoration: underline;
-}
-
-button.iris-cheat-btn:disabled {
+button.iris-cheat-btn:disabled,
+button.iris-dont-know-btn:disabled,
+button.iris-appeal-btn:disabled {
   opacity: 0.5;
   cursor: default;
   text-decoration: none;
@@ -1042,232 +1013,52 @@ textarea.iris-manual-card-input {
   background: transparent;
 }
 
-/* Browse facts view */
-.iris-browse-view {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px 20px;
-  height: 100%;
-  box-sizing: border-box;
-}
-
-.iris-browse-header {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.iris-browse-titlerow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.iris-browse-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.iris-browse-count {
-  font-size: 12px;
-  color: var(--text-faint);
-  flex: 1;
-}
-
-.iris-browse-meta-note {
-  color: var(--text-accent);
-}
-
-input.iris-browse-search {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  background: var(--background-primary);
-  color: var(--text-normal);
-  font-size: 14px;
-  outline: none;
-  box-shadow: none;
-}
-
-input.iris-browse-search:focus {
-  border-color: var(--interactive-accent);
-}
-
-.iris-browse-list {
-  flex: 1;
+/* Card library — the "Facts" Bases view. Everything around it (toolbar,
+   search, filters) is Bases' own. */
+.iris-facts-view {
+  padding: 0 var(--size-4-4) var(--size-4-4);
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
-.iris-browse-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  transition: background 0.1s ease;
+.iris-facts-group {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-muted);
+  padding: var(--size-4-3) 0 var(--size-4-1);
 }
 
-.iris-browse-row:hover {
+.iris-facts-row {
+  padding: var(--size-4-2) var(--size-4-3);
+  border-radius: var(--radius-s);
+  cursor: var(--cursor);
+}
+
+.iris-facts-row:hover {
   background: var(--background-modifier-hover);
 }
 
-.iris-browse-main {
-  flex: 1;
-  min-width: 0;
-  cursor: pointer;
+.iris-facts-body {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
 }
 
-.iris-browse-body {
-  font-size: 13px;
-  color: var(--text-normal);
-  line-height: 1.4;
-}
-
-.iris-browse-meta {
+.iris-facts-meta {
   display: flex;
-  gap: 12px;
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--text-faint);
+  flex-wrap: wrap;
+  gap: var(--size-2-2) var(--size-4-3);
+  margin-top: var(--size-2-1);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
 }
 
-button.iris-browse-delete {
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  cursor: pointer;
-  color: var(--text-faint);
-  opacity: 0;
-  padding: 6px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: opacity 0.1s ease, color 0.1s ease, background 0.1s ease;
+.iris-facts-meta:empty {
+  display: none;
 }
 
-.iris-browse-row:hover .iris-browse-delete {
-  opacity: 0.6;
-}
-
-.iris-browse-delete:hover {
-  opacity: 1 !important;
-  color: var(--text-error);
-  background: var(--background-modifier-hover);
-}
-
-.iris-browse-delete.iris-browse-delete-confirm {
-  opacity: 1;
-  color: var(--text-on-accent);
-  background: var(--text-error);
-}
-
-.iris-browse-delete.iris-browse-delete-confirm:hover {
-  background: var(--text-error);
-}
-
-.iris-browse-delete .svg-icon {
-  width: 14px;
-  height: 14px;
-}
-
-button.iris-browse-review {
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  cursor: pointer;
-  color: var(--text-faint);
-  opacity: 0;
-  padding: 6px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: opacity 0.1s ease, color 0.1s ease, background 0.1s ease;
-}
-
-.iris-browse-row:hover .iris-browse-review {
-  opacity: 0.6;
-}
-
-.iris-browse-review:hover {
-  opacity: 1 !important;
-  color: var(--interactive-accent);
-  background: var(--background-modifier-hover);
-}
-
-.iris-browse-review .svg-icon {
-  width: 14px;
-  height: 14px;
-}
-
-/* Selection for after-the-fact grouping */
-button.iris-browse-select {
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  cursor: pointer;
-  opacity: 0;
-  padding: 6px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: opacity 0.1s ease;
-}
-
-.iris-browse-row:hover .iris-browse-select {
-  opacity: 0.6;
-}
-
-button.iris-browse-select:hover,
-button.iris-browse-select.is-selected {
-  opacity: 1 !important;
-}
-
-.iris-browse-select-badge {
-  width: 18px;
-  height: 18px;
-  border: 1.5px solid var(--text-faint);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  line-height: 1;
-  color: var(--text-on-accent);
-}
-
-.iris-browse-select.is-selected .iris-browse-select-badge {
-  background: var(--interactive-accent);
-  border-color: var(--interactive-accent);
-}
-
-.iris-browse-row-selected {
-  background: var(--background-modifier-hover);
-}
-
-button.iris-browse-group-btn {
-  font-size: 12px;
-  padding: 4px 10px;
-}
-
-.iris-browse-meta-group {
-  color: var(--interactive-accent);
-}
-
-.iris-browse-empty {
+.iris-facts-empty {
   text-align: center;
   color: var(--text-muted);
   padding: 40px 0;
@@ -1519,6 +1310,31 @@ button.iris-author-later:hover {
   background: transparent;
 }
 
+/* Title row, matching the Create card / Edit card modal header: the same
+   form lives in both, so it should look like the same thing. */
+.iris-author-titlerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.iris-author-title {
+  flex: 1;
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+  line-height: var(--line-height-tight);
+}
+
+/* An existing question shown in place of a missing fact body. */
+.iris-author-example-label {
+  font-size: 0.68em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
 /* The capture breadcrumb — orientation, not content. Stays put whichever type
    is selected, including when Cloze takes the sentence below it. */
 .iris-author-context {
@@ -1678,9 +1494,6 @@ button.iris-author-option-mark.iris-author-option-correct {
   border-top: 1px solid var(--background-modifier-border);
 }
 
-.iris-author-secondary {
-  margin-left: auto;
-}
 
 select.dropdown.iris-author-type {
   height: auto;
@@ -1697,6 +1510,7 @@ select.dropdown.iris-author-type:hover {
 }
 
 button.iris-author-save {
+  margin-left: auto;
   padding: 5px 16px;
   font-size: 0.9em;
   color: var(--text-accent);
@@ -1826,7 +1640,6 @@ button.iris-cloze-reword:hover {
 }
 
 /* Edit pencil on the current review card (bottom-right corner) */
-.iris-edit-btn { bottom: 10px; right: 14px; }
 
 /* Author-card header buttons (Later + trash) */
 .iris-author-header-btns {

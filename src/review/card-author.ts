@@ -128,6 +128,24 @@ export function editableTypeId(variant: QAVariant): string | null {
   }
 }
 
+/**
+ * An existing variant as readable text — the fact text the form would write
+ * for it — or null when the form can't read its type. Decodes by filling the
+ * type's own fields off-screen and collecting them, so every type the form
+ * can edit reads back exactly as it would have been written.
+ */
+export function variantFactText(app: App, plugin: IrisCardsPlugin, variant: QAVariant): string | null {
+  const id = editableTypeId(variant);
+  const def = id ? TYPE_DEFS.find(d => d.id === id) : undefined;
+  if (!def) return null;
+  try {
+    const result = def.build(createDiv(), variant, { app, plugin })();
+    return typeof result === "string" ? null : result.factText.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Small form helpers ─────────────────────────────────────────────────
 
 function autoGrow(ta: HTMLTextAreaElement): void {
@@ -774,7 +792,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
   },
   {
     id: "synonym",
-    label: "Synonym",
+    label: "Alternate name",
     build(fields, initial) {
       const term = addText(fields, "Term", "Krebs cycle");
       const alt = addText(fields, "Alternate name", "citric acid cycle");
@@ -876,8 +894,6 @@ export interface CardAuthorFormOpts {
   onSave: (card: AuthoredCard) => void | Promise<void>;
   /** The fact's own sentence, for types that start from it (see AuthorCtx). */
   seedText?: string;
-  /** Extra controls for the footer's left side (the review flow's Later/discard). */
-  buildSecondaryActions?: (host: HTMLElement) => void;
 }
 
 /**
@@ -900,8 +916,6 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
   for (const def of TYPE_DEFS) {
     typeSelect.createEl("option", { text: def.label, attr: { value: def.id } });
   }
-  const secondary = actions.createDiv({ cls: "iris-author-secondary" });
-  opts.buildSecondaryActions?.(secondary);
   const saveBtn = actions.createEl("button", { cls: "iris-author-save", text: opts.saveLabel ?? "Save card" });
 
   const prefillTypeId = opts.initial ? editableTypeId(opts.initial) : null;

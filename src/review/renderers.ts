@@ -1,4 +1,4 @@
-import { type App, type Component, Component as ComponentImpl, Modal, Platform, TFile, MarkdownRenderer, setIcon } from "obsidian";
+import { type App, type Component, Component as ComponentImpl, Menu, Modal, Platform, TFile, MarkdownRenderer, setIcon } from "obsidian";
 import type IrisCardsPlugin from "../main";
 import { type ParsedQA, type QAVariant, type ExerciseType } from "../types/exercises";
 import { parseQABlock } from "../types/qa-block";
@@ -390,7 +390,6 @@ class CardController {
       : () => {};
     this.keyCleanup = cleanup;
     this.on(btn, "click", () => go(cleanup));
-    this.addCheatButton(actions, gapTerm);
     this.focus(btn);
     if (this.interactive) scrollActionsIntoView(actions);
   }
@@ -403,10 +402,17 @@ class CardController {
    * The typed answer is deliberately not passed on: recording a cheated-correct
    * string as an accepted answer (or a knee-jerk one as known-incorrect) would
    * train marking on an answer the learner never really produced.
+   *
+   * Rendered in its own row under `container` rather than inside it: it isn't a
+   * grade, and sitting in the grade row invited it being read as a fourth one.
+   * Only offered where the answer was right — cheating is a claim about a
+   * correct answer, so there's nothing to confess after a wrong one.
    */
   addCheatButton(container: HTMLElement, gapTerm?: string): void {
     if (!this.interactive) return;
-    const btn = container.createEl("button", {
+    const row = createDiv({ cls: "iris-actions iris-cheat-row" });
+    container.insertAdjacentElement("afterend", row);
+    const btn = row.createEl("button", {
       cls: "iris-cheat-btn",
       text: "Cheated",
       attr: { "aria-label": "Cheated or knee-jerk — rephrase this question" },
@@ -443,7 +449,7 @@ class CardController {
 
   /** Post-correct rating: reveal/create Hard/Good/Easy, or auto-Next when peeked. */
   private showPostRating(userAnswer?: string, gapTerm?: string): void {
-    if (this.view.peekedAnswer || this.view.infiniteMode) {
+    if (this.view.peekedAnswer) {
       this.card.querySelector(".iris-post-rating")?.remove();
       void this.answer(true, userAnswer, gapTerm, GRADE_GOOD);
       return;
@@ -587,7 +593,9 @@ async function renderManualReveal(
       controller.feedback(correct, false);
       void answer(correct, typedAnswer(), opts.gapTerm, grade);
     });
-    controller.addCheatButton(actions, opts.gapTerm);
+    // A blank answer only offers Again — there's no correct answer to have
+    // cheated your way to.
+    if (grades.length > 1) controller.addCheatButton(actions, opts.gapTerm);
     actions.removeClass("iris-hidden");
     if (controller.interactive) scrollActionsIntoView(actions);
   };
@@ -600,11 +608,7 @@ async function renderManualReveal(
     answerSection.removeClass("iris-hidden");
     showBtn?.addClass("iris-hidden");
     if (!showActions) return;
-    if (view.infiniteMode) {
-      // Infinite mode auto-advances on every other card type — do the same
-      // here instead of demanding an extra "Next" press.
-      void answer(true, typedAnswer(), opts.gapTerm, GRADE_GOOD);
-    } else if (view.peekedAnswer) {
+    if (view.peekedAnswer) {
       const next = card.createDiv({ cls: "iris-actions" });
       const btn = next.createEl("button", { cls: "iris-rate-btn iris-rate-good", text: "Next" });
       controller.on(btn, "click", () => void answer(true, typedAnswer(), opts.gapTerm, GRADE_GOOD));
@@ -627,7 +631,7 @@ async function renderManualReveal(
         // because there's no judgment to base a color on.
         input!.addClass("iris-answer-input-correct");
         controller.feedback(true, false);
-        if (view.peekedAnswer || view.infiniteMode) { reveal(); return; }
+        if (view.peekedAnswer) { reveal(); return; }
         reveal(false);
         const rating = card.createDiv({ cls: "iris-actions" });
         controller.renderGradeButtons(rating, POST_GRADES, (grade) => {
@@ -695,8 +699,10 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
   controller.on(input, "compositionend", () => { composing = false; });
 
   // Honest out: reveal the answer and take the Again, instead of guessing
-  // (which pollutes marking) or typing filler.
-  const dontKnowBtn = inputSection.createEl("button", { cls: "iris-dont-know-btn", text: "Don't know" });
+  // (which pollutes marking) or typing filler. Its own quiet row under the
+  // answering controls, mirroring "Cheated" under the grades.
+  const dontKnowRow = card.createDiv({ cls: "iris-actions iris-dont-know-row" });
+  const dontKnowBtn = dontKnowRow.createEl("button", { cls: "iris-dont-know-btn", text: "Don't know" });
 
   const markingEl = card.createDiv({ cls: "iris-marking" });
   controller.prerenderRating();
@@ -704,7 +710,7 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
   controller.focusInitial(input);
 
   const showResult = (correct: boolean) => {
-    dontKnowBtn.remove();
+    dontKnowRow.remove();
     markingEl.removeClass("iris-loading");
     markingEl.setText(correct ? (view.peekedAnswer ? "Correct (peeked)" : "Correct") : "Incorrect");
     markingEl.toggleClass("iris-marking-correct", correct);
@@ -746,8 +752,8 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
 
     if (isKnownIncorrect?.(userAnswer)) {
       showResult(false);
-      if (!opts.noAppeal) addAppealButton(a, userAnswer, markingEl, opts.questionMd);
       await controller.resolve(false, { userAnswer, gapTerm: opts.gapTerm });
+      if (!opts.noAppeal) addAppealButton(a, userAnswer, markingEl, opts.questionMd);
       return;
     }
 
@@ -762,8 +768,8 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
     // No LLM marker — local check is final
     if (!opts.llmMarker) {
       showResult(false);
-      if (!opts.noAppeal) addAppealButton(a, userAnswer, markingEl, opts.questionMd);
       await controller.resolve(false, { userAnswer, gapTerm: opts.gapTerm });
+      if (!opts.noAppeal) addAppealButton(a, userAnswer, markingEl, opts.questionMd);
       return;
     }
 
@@ -788,8 +794,8 @@ async function renderInputCard(a: RenderArgs, opts: InputOpts): Promise<void> {
     }
     const correct = mark.value;
     showResult(correct);
-    if (!correct) addAppealButton(a, userAnswer, markingEl);
     await controller.resolve(correct, { userAnswer, gapTerm: opts.gapTerm });
+    if (!correct) addAppealButton(a, userAnswer, markingEl);
   };
 
   if (opts.autoSubmitOnMatch) {
@@ -842,11 +848,16 @@ function addAppealButton(
   const preDifficulty = getDifficulty(preFm);
   const preBox = getLeitnerBox(preFm, view.plugin.settings.desiredRetention);
 
-  const appealBtn = card.createEl("button", {
-    cls: "iris-card-icon iris-appeal-icon",
-    attr: { "aria-label": "Appeal" },
+  // A quiet text button beside Continue (the row resolve() just built), not a
+  // corner icon: it belongs with the verdict it disputes. Joining the existing
+  // row keeps the card inside the height lock typed-input cards set before
+  // marking, where a new row would spill past it.
+  const row = card.querySelector<HTMLElement>(".iris-continue") ?? card;
+  const appealBtn = row.createEl("button", {
+    cls: "iris-appeal-btn",
+    text: "Appeal",
+    attr: { "aria-label": "Appeal — ask the marker to look again" },
   });
-  setIcon(appealBtn, "scale");
 
   controller.on(appealBtn, "click", async () => {
     appealBtn.disabled = true;
@@ -945,9 +956,6 @@ interface ChoiceOpts {
   keys?: Record<string, string>;
 }
 
-/** Sentinel option value for "Don't know" — never matches a real answer. */
-const DONT_KNOW = "__dont-know__";
-
 async function renderChoiceCard(a: RenderArgs, opts: ChoiceOpts): Promise<void> {
   const { view, card, controller } = a;
   const questionSection = card.createDiv({ cls: "iris-question" });
@@ -955,14 +963,21 @@ async function renderChoiceCard(a: RenderArgs, opts: ChoiceOpts): Promise<void> 
 
   const optionsSection = card.createDiv({ cls: `iris-mc-options${opts.optionsCls ? " " + opts.optionsCls : ""}` });
 
-  // "Don't know" reveals the answer and counts as incorrect — an honest out
-  // that beats guessing (a lucky guess would schedule the card as known).
-  const allOptions = [
-    ...opts.options,
-    { label: "Don't know", value: DONT_KNOW, cls: "iris-dont-know" },
-  ];
+  // Reveal the correct option and lock the row. `picked` is the button that was
+  // pressed, if the answer came from one — "Don't know" has no option of its own
+  // to mark wrong.
+  const revealOptions = (picked: HTMLElement | null, correct: boolean) => {
+    for (const child of Array.from(optionsSection.querySelectorAll<HTMLButtonElement>(".iris-mc-option"))) {
+      child.disabled = true;
+      if (child.dataset.value === opts.correct) {
+        child.addClass("iris-mc-correct");
+      } else if (child === picked && !correct) {
+        child.addClass("iris-mc-incorrect");
+      }
+    }
+  };
 
-  for (const opt of allOptions) {
+  for (const opt of opts.options) {
     const btn = optionsSection.createEl("button", {
       cls: `iris-mc-option${opt.cls ? " " + opt.cls : ""}`,
       text: opt.label,
@@ -972,19 +987,24 @@ async function renderChoiceCard(a: RenderArgs, opts: ChoiceOpts): Promise<void> 
     controller.on(btn, "click", async () => {
       if (!controller.begin()) return;
       const correct = opt.value === opts.correct;
-
-      for (const child of Array.from(optionsSection.querySelectorAll<HTMLButtonElement>(".iris-mc-option"))) {
-        child.disabled = true;
-        if (child.dataset.value === opts.correct) {
-          child.addClass("iris-mc-correct");
-        } else if (child === btn && !correct && opt.value !== DONT_KNOW) {
-          child.addClass("iris-mc-incorrect");
-        }
-      }
-
+      dontKnowRow.remove();
+      revealOptions(btn, correct);
       await controller.resolve(correct);
     });
   }
+
+  // "Don't know" reveals the answer and counts as incorrect — an honest out
+  // that beats guessing (a lucky guess would schedule the card as known). It
+  // sits in its own quiet row under the options rather than among them: it
+  // isn't one of the answers, just as "Cheated" isn't one of the grades.
+  const dontKnowRow = card.createDiv({ cls: "iris-actions iris-dont-know-row" });
+  const dontKnowBtn = dontKnowRow.createEl("button", { cls: "iris-dont-know-btn", text: "Don't know" });
+  controller.on(dontKnowBtn, "click", async () => {
+    if (!controller.begin()) return;
+    dontKnowRow.remove();
+    revealOptions(null, false);
+    await controller.resolve(false);
+  });
 
   if (controller.interactive && opts.keys) {
     bindChoiceKeys(view, optionsSection, opts.keys);
@@ -998,8 +1018,10 @@ async function renderMultipleChoice(a: RenderArgs): Promise<void> {
   const order = getOrInit(rs, "shuffledOptions", () => shuffleArray(mc.options));
   await renderChoiceCard(a, {
     questionMd: mc.question,
-    options: order.map(o => ({ label: o.text, value: o.letter })),
+    options: order.map((o, i) => ({ label: o.text, value: o.letter, ariaLabel: `${o.text} [${i + 1}]` })),
     correct: mc.correct,
+    // Number keys follow the on-screen (shuffled) order, not the stored letters.
+    keys: Object.fromEntries(order.slice(0, 9).map((o, i) => [String(i + 1), o.letter])),
   });
 }
 
@@ -2035,10 +2057,7 @@ async function renderMultiStep(a: RenderArgs): Promise<void> {
   });
 
   const finish = () => {
-    if (view.infiniteMode) {
-      // Match the auto-advance every other card type does in infinite mode.
-      void answer(true, typed.filter(Boolean).join(" / ") || undefined, undefined, GRADE_GOOD);
-    } else if (view.peekedAnswer) {
+    if (view.peekedAnswer) {
       const next = card.createDiv({ cls: "iris-actions" });
       const btn = next.createEl("button", { cls: "iris-rate-btn iris-rate-good", text: "Next" });
       controller.on(btn, "click", () => void answer(true, typed.filter(Boolean).join(" / ") || undefined, undefined, GRADE_GOOD));
@@ -2195,6 +2214,34 @@ export async function renderVariantInto(
   }
 }
 
+/** One entry in a card's overflow menu. */
+export interface CardMenuItem {
+  title: string;
+  icon: string;
+  onClick: () => void | Promise<void>;
+}
+
+/**
+ * The card's single "⋯" affordance: a faint button in the top-right corner
+ * that opens an Obsidian Menu (a bottom sheet on mobile) holding the rare
+ * per-card actions. Nothing else is pinned to the card's edges.
+ */
+export function addCardMenu(card: HTMLElement, items: CardMenuItem[]): void {
+  if (items.length === 0) return;
+  const btn = card.createEl("button", {
+    cls: "iris-card-icon iris-card-menu-btn",
+    attr: { "aria-label": "Card actions" },
+  });
+  setIcon(btn, "more-horizontal");
+  btn.addEventListener("click", (evt) => {
+    const menu = new Menu();
+    for (const item of items) {
+      menu.addItem((mi) => mi.setTitle(item.title).setIcon(item.icon).onClick(() => void item.onClick()));
+    }
+    menu.showAtMouseEvent(evt);
+  });
+}
+
 export async function renderCurrentCard(
   view: ReviewView, body: HTMLDivElement, cardFile: TFile, variant: QAVariant,
 ): Promise<void> {
@@ -2204,83 +2251,88 @@ export async function renderCurrentCard(
   const answer = createAnswerHandler(view, card, cardFile, variant);
   await renderVariantInto(view, card, cardFile, variant, answer);
 
-  // Suspend button — permanently disables this question variant
-  const suspendBtn = card.createEl("button", {
-    cls: "iris-card-icon iris-suspend-btn",
-    attr: { "aria-label": "Suspend question" },
-  });
-  setIcon(suspendBtn, "eye-off");
-  suspendBtn.addEventListener("click", async () => {
-    const remaining = await view.plugin.cardStore.suspendVariant(cardFile, variant.question);
-    view.plugin.qaCache.delete(cardFile.path);
-    if (remaining.length === 0) view.dueCards.shift();
-    await view.showNextCard();
+  // Per-card actions live in one overflow menu rather than four corner icons:
+  // all are rare, none is part of the answer-and-grade loop, and four faint
+  // affordances scattered over the card were a standing distraction.
+  const items: CardMenuItem[] = [];
+
+  // Suspend — permanently disables this question variant
+  items.push({
+    title: "Suspend question",
+    icon: "eye-off",
+    onClick: async () => {
+      const remaining = await view.plugin.cardStore.suspendVariant(cardFile, variant.question);
+      view.plugin.qaCache.delete(cardFile.path);
+      if (remaining.length === 0) view.dueCards.shift();
+      await view.showNextCard();
+    },
   });
 
-  // Parent note button — peeks at the source note in a modal
+  // Parent note — peeks at the source note in a modal
   const parentNote = view.app.metadataCache.getFileCache(cardFile)?.frontmatter?.["parent-note"];
   if (parentNote) {
     const linkMatch = typeof parentNote === "string" && parentNote.match(/^\[\[(.+?)(\|.+?)?\]\]$/);
     if (linkMatch) {
       const resolved = view.app.metadataCache.getFirstLinkpathDest(linkMatch[1], cardFile.path);
       if (resolved) {
-        const parentBtn = card.createEl("button", {
-          cls: "iris-card-icon iris-parent-btn",
-          attr: { "aria-label": "Peek at parent note" },
-        });
-        setIcon(parentBtn, "help-circle");
-        parentBtn.addEventListener("click", () => {
-          view.peekedAnswer = true;
-          new PeekModal(view.app, resolved).open();
+        items.push({
+          title: "Peek at parent note",
+          icon: "help-circle",
+          onClick: () => {
+            view.peekedAnswer = true;
+            new PeekModal(view.app, resolved).open();
+          },
         });
       }
     }
   }
 
-  // Card file button — opens the card .md file in an editable tab
-  const cardFileBtn = card.createEl("button", {
-    cls: "iris-card-icon iris-card-file-btn",
-    attr: { "aria-label": "Open card file" },
-  });
-  setIcon(cardFileBtn, "file-text");
-  cardFileBtn.addEventListener("click", () => {
-    view.peekedAnswer = true;
-    view.app.workspace.getLeaf("tab").openFile(cardFile);
+  // Card file — opens the card .md file in an editable tab. `active` is not
+  // optional here: on mobile the menu's dismissal hands focus back to the
+  // review, and a leaf opened without it exists but is never shown.
+  items.push({
+    title: "Open card file",
+    icon: "file-text",
+    onClick: () => {
+      view.peekedAnswer = true;
+      void view.app.workspace.getLeaf("tab").openFile(cardFile, { active: true });
+    },
   });
 
-  // Edit button — reopens the authoring form pre-filled, so fixing a typo
-  // never means hand-editing the card's encoded lines. Only for variants the
-  // form knows how to decode.
+  // Edit — reopens the authoring form pre-filled, so fixing a typo never
+  // means hand-editing the card's encoded lines. Only for variants the form
+  // knows how to decode.
   if (editableTypeId(variant)) {
-    const editBtn = card.createEl("button", {
-      cls: "iris-card-icon iris-edit-btn",
-      attr: { "aria-label": "Edit card" },
-    });
-    setIcon(editBtn, "pencil");
-    editBtn.addEventListener("click", () => {
-      new CardEditModal(view.app, view.plugin, variant, async (authored) => {
-        await view.plugin.cardStore.updateVariants(cardFile, (vs) => {
-          const idx = vs.findIndex(v => v.question === variant.question && v.exerciseType === variant.exerciseType);
-          if (idx === -1) {
-            vs.push(authored.variant);
-          } else {
-            // Keep review history/metadata; replace only the content.
-            vs[idx] = {
-              ...vs[idx],
-              exerciseType: authored.variant.exerciseType,
-              question: authored.variant.question,
-              answer: authored.variant.answer,
-            };
-          }
-        });
-        invalidateParsedCache(cardFile.path);
-        view.plugin.qaCache.delete(cardFile.path);
-        view.clearCommit(cardFile.path);
-        view.renderStateCache.delete(cardFile.path + "\0" + variant.question);
-        await view.showNextCard();
-      }).open();
+    items.push({
+      title: "Edit card",
+      icon: "pencil",
+      onClick: () => {
+        new CardEditModal(view.app, view.plugin, variant, async (authored) => {
+          await view.plugin.cardStore.updateVariants(cardFile, (vs) => {
+            const idx = vs.findIndex(v => v.question === variant.question && v.exerciseType === variant.exerciseType);
+            if (idx === -1) {
+              vs.push(authored.variant);
+            } else {
+              // Keep review history/metadata; replace only the content.
+              vs[idx] = {
+                ...vs[idx],
+                exerciseType: authored.variant.exerciseType,
+                question: authored.variant.question,
+                answer: authored.variant.answer,
+              };
+            }
+          });
+          invalidateParsedCache(cardFile.path);
+          view.plugin.qaCache.delete(cardFile.path);
+          view.clearCommit(cardFile.path);
+          view.renderStateCache.delete(cardFile.path + "\0" + variant.question);
+          await view.showNextCard();
+        }).open();
+      },
     });
   }
+
+  addCardMenu(card, items);
 
   view.scrollToCenter(card);
 }

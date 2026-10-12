@@ -8,18 +8,18 @@ import {
 import { IrisCardsSettingTab, DEFAULT_SETTINGS, FSRS_MIN_SAMPLES, FSRS_AUTO_REFIT_NEW_SAMPLES } from "./settings";
 import type { IrisCardsSettings } from "./settings";
 import { ReviewView, VIEW_TYPE_REVIEW, type ReviewScope } from "./review/review-view";
-import { BrowseView, VIEW_TYPE_BROWSE } from "./review/browse-view";
+import { registerCardLibrary, openCardLibrary } from "./review/card-library";
 import { AudioReviewView, VIEW_TYPE_AUDIO } from "./review/audio-view";
-import { countDueFromCache, estimateDueMinutes, getParentNoteName, setFSRSWeights } from "./scheduler";
+import { activeModuleFilter, countDueFromCache, estimateDueMinutes, getParentNoteName, setFSRSWeights } from "./scheduler";
 import { collectCardLogs, countSamples, optimizeFSRS } from "./fsrs-optimizer";
 import { CardStore } from "./card-store";
-import { TableStore } from "./table-store";
 import { type QAVariant } from "./types/exercises";
 import { setRelayApp } from "./api/client";
 import { encryptSecret, decryptSecret } from "./commands/utils";
 import { PregenManager } from "./commands/pregeneration";
 import { makeFlashcard, createImageOcclusionCard, createCardManually } from "./commands/note-creation";
 import { checkAndRepairDueDates } from "./commands/due-date-audit";
+import { groupCards } from "./commands/group-cards";
 import { buildIrisCardsHomepageWidgets } from "./widgets/homepage-widget";
 import { syncFlashcardTask } from "./tasks-bridge";
 
@@ -29,7 +29,6 @@ export default class IrisCardsPlugin extends Plugin {
   settings: IrisCardsSettings = DEFAULT_SETTINGS;
   qaCache: Map<string, Promise<QAVariant[]>> = new Map();
   cardStore!: CardStore;
-  tableStore!: TableStore;
   pregen!: PregenManager;
   reviewViews: Set<ReviewView> = new Set();
   private ribbonIconEl: HTMLElement | null = null;
@@ -39,7 +38,6 @@ export default class IrisCardsPlugin extends Plugin {
     await this.loadSettings();
     setRelayApp(this.app);
     this.cardStore = new CardStore(this.app);
-    this.tableStore = new TableStore(this.app);
     this.pregen = new PregenManager(this);
     await this.configureHotkeys();
 
@@ -48,10 +46,7 @@ export default class IrisCardsPlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new ReviewView(leaf, this),
     );
 
-    this.registerView(
-      VIEW_TYPE_BROWSE,
-      (leaf: WorkspaceLeaf) => new BrowseView(leaf, this),
-    );
+    registerCardLibrary(this);
 
     this.registerView(
       VIEW_TYPE_AUDIO,
@@ -71,9 +66,9 @@ export default class IrisCardsPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "open-browse",
-      name: "Browse facts",
-      callback: () => this.activateBrowseView(),
+      id: "open-card-library",
+      name: "Open card library",
+      callback: () => openCardLibrary(this),
     });
 
     // Audio-only review is its own process (experimental) — a separate view,
@@ -101,6 +96,17 @@ export default class IrisCardsPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "run-through-note-cards",
+      name: "Run through every card in this note",
+      checkCallback: (checking: boolean) => {
+        const note = this.activeNoteName();
+        if (!note || !this.noteHasCards(note)) return false;
+        if (!checking) void this.activateNoteRunThrough(note);
+        return true;
+      },
+    });
+
+    this.addCommand({
       id: "create-image-occlusion-card",
       name: "Create image occlusion card",
       callback: () => createImageOcclusionCard(this),
@@ -110,13 +116,6 @@ export default class IrisCardsPlugin extends Plugin {
       id: "create-card-manually",
       name: "Create card manually",
       callback: () => createCardManually(this),
-    });
-
-    // Tables are hand-edited markdown — the command just scaffolds the shape.
-    this.addCommand({
-      id: "create-table",
-      name: "Create table",
-      callback: () => void this.createTableFile(),
     });
 
     this.addCommand({
@@ -143,8 +142,12 @@ export default class IrisCardsPlugin extends Plugin {
       this.maybeAutoOptimizeFSRS();
       // Catch up on parent-note tag changes made while the plugin was off.
       void this.cardStore.syncInheritedTags(this.settings.cardsFolder);
-      // Warm the table cache so the badge can count due rows synchronously.
-      void this.tableStore.getTables(this.settings.cardsFolder).then(() => this.updateBadge());
+      this.scheduleEmptyNoteSweep();
+      // Closing a tab is when an abandoned empty note stops being "open", so
+      // that's when to look again. Also on a slow timer, for ones that age
+      // past the one-minute grace without any tab ever changing.
+      this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleEmptyNoteSweep()));
+      this.registerInterval(window.setInterval(() => this.scheduleEmptyNoteSweep(), 5 * 60_000));
     });
 
     const invalidateCache = (file: unknown) => { if (file instanceof TFile) this.qaCache.delete(file.path); };
@@ -156,18 +159,15 @@ export default class IrisCardsPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       const cardsFolder = this.settings.cardsFolder.trim() || "Iris Cards";
       if (file instanceof TFile && file.extension === "md") {
-        if (this.tableStore.isTableFile(file)) {
-          menu.addItem(item => item
-            .setTitle("Review this table")
-            .setIcon("loader")
-            .onClick(() => void this.activateTableReview(file)));
-        } else if (this.tableStore.isStateFile(file)) {
-          // State files aren't reviewable — no menu entry.
-        } else if (file.path.startsWith(cardsFolder + "/")) {
+        if (file.path.startsWith(cardsFolder + "/")) {
           menu.addItem(item => item
             .setTitle("Review this card")
             .setIcon("loader")
             .onClick(() => void this.activateCardReview(file.path)));
+          menu.addItem(item => item
+            .setTitle("Add to group…")
+            .setIcon("layers")
+            .onClick(() => groupCards(this, [file])));
         } else if (this.noteHasCards(file.basename)) {
           menu.addItem(item => item
             .setTitle("Review cards from this note")
@@ -184,18 +184,22 @@ export default class IrisCardsPlugin extends Plugin {
       }
     }));
 
+    // Multi-select in the file explorer: group several cards at once, in the
+    // order they're listed.
+    this.registerEvent(this.app.workspace.on("files-menu", (menu, files) => {
+      const cardsFolder = this.settings.cardsFolder.trim() || "Iris Cards";
+      const cards = files.filter((f): f is TFile =>
+        f instanceof TFile && f.extension === "md" && f.path.startsWith(cardsFolder + "/"));
+      if (cards.length < 2) return;
+      menu.addItem(item => item
+        .setTitle(`Group ${cards.length} cards…`)
+        .setIcon("layers")
+        .onClick(() => groupCards(this, cards)));
+    }));
+
     this.registerEvent(this.app.metadataCache.on("changed", (file) => {
       const folder = this.settings.cardsFolder.trim() || "Iris Cards";
       if (file.path.startsWith(folder + "/")) {
-        if (this.tableStore.isTableFile(file)) {
-          // Re-parse (the mtime-keyed cache invalidates itself), then recount.
-          void this.tableStore.getTable(file).then(() => this.updateBadge());
-        } else if (this.tableStore.isStateFile(file)) {
-          // A state-file edit (hand-fix or another device's sync) changes the
-          // paired table's row state — re-parse that table, then recount.
-          const table = this.tableStore.pairedTable(file);
-          if (table) void this.tableStore.getTable(table).then(() => this.updateBadge());
-        }
         this.updateBadge();
       } else if (file.extension === "md") {
         // Cards inherit tags live from their parent note — resync this
@@ -261,27 +265,24 @@ export default class IrisCardsPlugin extends Plugin {
     }
   }
 
-  /** Scaffold a table file in the cards folder and open it for editing. Rows
-   * are introduced from the review view's done screen once the table has
-   * content — see table-store.ts for the format. */
-  private async createTableFile(): Promise<void> {
-    const cardsFolder = this.settings.cardsFolder.trim() || "Iris Cards";
-    await this.cardStore.ensureFolderExists(cardsFolder);
-    const template = [
-      "---",
-      "kind: table",
-      "table: New table",
-      "order-by: ",
-      "---",
-      "",
-      "| Name | Value |",
-      "| ---- | ----- |",
-      "| Example | 1 |",
-      "",
-    ].join("\n");
-    const file = await this.app.vault.create(`${cardsFolder}/Table ${Date.now()}.md`, template);
-    await this.app.workspace.getLeaf("tab").openFile(file);
-    new Notice("Fill in the table, name it, and set order-by to the column that decides introduction order.");
+  private emptySweepTimer: number | null = null;
+
+  /** Debounced CardStore.trashEmptyNotes — layout-change fires in bursts. */
+  private scheduleEmptyNoteSweep(): void {
+    if (this.emptySweepTimer != null) window.clearTimeout(this.emptySweepTimer);
+    this.emptySweepTimer = window.setTimeout(async () => {
+      this.emptySweepTimer = null;
+      try {
+        const trashed = await this.cardStore.trashEmptyNotes(this.settings.cardsFolder);
+        if (trashed.length > 0) {
+          new Notice(trashed.length === 1
+            ? `Moved the empty note "${trashed[0]}" out of the cards folder to the trash.`
+            : `Moved ${trashed.length} empty notes out of the cards folder to the trash.`);
+        }
+      } catch (e) {
+        console.error("[iris-cards] empty-note sweep failed", e);
+      }
+    }, 1000);
   }
 
   private tagSyncTimers = new Map<string, number>();
@@ -364,7 +365,6 @@ export default class IrisCardsPlugin extends Plugin {
 
   onunload(): void {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_REVIEW);
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE_BROWSE);
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_AUDIO);
   }
 
@@ -402,10 +402,9 @@ export default class IrisCardsPlugin extends Plugin {
     // Callers that just updated the queue (e.g. the homepage widget after
     // recordReview) pass their in-memory count and let us skip the folder
     // scan. Without a hint we fall back to recomputing from the metadata cache.
-    const mf = this.settings.reviewModuleFilter.length > 0 ? new Set(this.settings.reviewModuleFilter) : undefined;
+    const mf = activeModuleFilter(this.app, this.settings.cardsFolder, this.settings.reviewModuleFilter);
     const count = knownCount
-      ?? countDueFromCache(this.app, this.settings.cardsFolder, 0, this.settings.desiredRetention, mf)
-        + this.tableStore.cachedDueRowCount(this.settings.cardsFolder, this.settings.desiredRetention, mf);
+      ?? countDueFromCache(this.app, this.settings.cardsFolder, 0, this.settings.desiredRetention, mf);
     syncFlashcardTask(this.app, count, estimateDueMinutes(this.app, this.settings.cardsFolder, count, mf));
     if (!this.ribbonIconEl) return;
     if (pos !== "off" && count > 0) {
@@ -434,17 +433,6 @@ export default class IrisCardsPlugin extends Plugin {
     await leaf.setViewState({ type: VIEW_TYPE_REVIEW, active: true });
     this.app.workspace.revealLeaf(leaf);
     return { reused: false };
-  }
-
-  async activateBrowseView(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_BROWSE);
-    if (existing.length > 0) {
-      this.app.workspace.revealLeaf(existing[0]);
-      return;
-    }
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.setViewState({ type: VIEW_TYPE_BROWSE, active: true });
-    this.app.workspace.revealLeaf(leaf);
   }
 
   async activateAudioReview(): Promise<void> {
@@ -485,8 +473,8 @@ export default class IrisCardsPlugin extends Plugin {
     return false;
   }
 
-  /** Open the review view scoped to a subset of cards, in infinite (practice)
-   * mode so nothing feeds back into the schedule. */
+  /** Open the review view scoped to a subset of cards, in infinite mode so the
+   * whole scope is available regardless of what's due. */
   private async activateScopedReview(scope: ReviewScope): Promise<void> {
     await this.activateReviewView();
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_REVIEW)[0];
@@ -496,11 +484,33 @@ export default class IrisCardsPlugin extends Plugin {
     await view.setScope(scope);
   }
 
+  /** The note whose cards a note command acts on: the active note, or — when
+   * a card is open — the card's parent note. */
+  private activeNoteName(): string | undefined {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) return undefined;
+    const cardsFolder = this.settings.cardsFolder.trim() || "Iris Cards";
+    if (file.path.startsWith(cardsFolder + "/")) {
+      return getParentNoteName(this.app.metadataCache.getFileCache(file)?.frontmatter);
+    }
+    return file.basename;
+  }
+
+  /** Review every card from a note once, due or not, then stop. */
+  async activateNoteRunThrough(noteName: string): Promise<void> {
+    await this.activateReviewView();
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_REVIEW)[0];
+    if (!leaf) return;
+    const view = leaf.view as ReviewView;
+    view.infiniteMode = false;
+    await view.setScope({ kind: "note", value: noteName, label: noteName, runThrough: true });
+  }
+
   async activateNoteReview(noteName: string): Promise<void> {
     await this.activateScopedReview({ kind: "note", value: noteName, label: noteName });
   }
 
-  /** Practice-review a single card (from the browse view / explorer). */
+  /** Practice-review a single card (from its file menu). */
   async activateCardReview(path: string): Promise<void> {
     const fm = this.app.metadataCache.getCache(path)?.frontmatter;
     const label = typeof fm?.["displayTitle"] === "string" && fm["displayTitle"].trim()
@@ -519,12 +529,5 @@ export default class IrisCardsPlugin extends Plugin {
   /** Review every card whose parent note lives under `folderPath`. */
   async activateFolderReview(folderPath: string): Promise<void> {
     await this.activateScopedReview({ kind: "folder", value: folderPath, label: folderPath.split("/").pop() ?? folderPath });
-  }
-
-  /** Practice-review the introduced rows of one table. */
-  async activateTableReview(file: TFile): Promise<void> {
-    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    const label = typeof fm?.["table"] === "string" && fm["table"].trim() ? fm["table"].trim() : file.basename;
-    await this.activateScopedReview({ kind: "table", value: file.path, label });
   }
 }

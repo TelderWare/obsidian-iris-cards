@@ -1,6 +1,6 @@
 import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type IrisCardsPlugin from "../main";
-import { getDueCards, getAllCards, weightedForgettingPick } from "../scheduler";
+import { activeModuleFilter, getDueCards, getAllCards, weightedForgettingPick } from "../scheduler";
 import { type QAVariant } from "../types/exercises";
 import { getParsedCached } from "./renderers";
 import { AudioReviewController } from "./audio-controller";
@@ -90,9 +90,7 @@ export class AudioReviewView extends ItemView {
   }
 
   private loadQueue(): void {
-    const mf = this.plugin.settings.reviewModuleFilter.length > 0
-      ? new Set(this.plugin.settings.reviewModuleFilter)
-      : undefined;
+    const mf = activeModuleFilter(this.app, this.plugin.settings.cardsFolder, this.plugin.settings.reviewModuleFilter);
     this.dueCards = this.infiniteMode
       ? getAllCards(this.app, this.plugin.settings.cardsFolder, mf, undefined, true)
       : getDueCards(this.app, this.plugin.settings.cardsFolder, 0, mf, this.plugin.settings.desiredRetention);
@@ -164,7 +162,7 @@ export class AudioReviewView extends ItemView {
   private async qaVariantOf(file: TFile): Promise<QAVariant | null> {
     try {
       const parsed = await getParsedCached(this.app, file);
-      return parsed.variants.find(v => v.exerciseType === "Q&A" && !v.suspended) ?? null;
+      return parsed.variants.find(v => v.exerciseType === "Q&A" && !v.suspended && !v.rephrase) ?? null;
     } catch {
       return null;
     }
@@ -206,22 +204,18 @@ export class AudioReviewView extends ItemView {
     const file = cardFile;
     const answerFn = async (correct: boolean, userAnswer?: string) => {
       if (this.closed || session !== this.session) return;
-      // Infinite mode is for practice; nothing feeds back into FSRS (same
-      // contract as the visual review view). Answered cards rotate to the
-      // back of the pool instead of leaving the queue.
-      if (this.infiniteMode) {
-        const done = this.dueCards.shift();
-        if (done) this.dueCards.push(done);
-      } else {
-        await this.plugin.cardStore.recordReview(
-          file, correct, v.question, userAnswer, undefined, undefined,
-          undefined, this.plugin.settings.cardsFolder,
-          this.plugin.settings.desiredRetention, this.plugin.settings.scheduler,
-        );
-        this.plugin.qaCache.delete(file.path);
-        this.dueCards.shift();
-        this.plugin.updateBadge();
-      }
+      // Infinite mode records like any review (same contract as the visual
+      // review view); answered cards just rotate to the back of the pool
+      // instead of leaving the queue.
+      await this.plugin.cardStore.recordReview(
+        file, correct, v.question, userAnswer, undefined, undefined,
+        undefined, this.plugin.settings.cardsFolder,
+        this.plugin.settings.desiredRetention, this.plugin.settings.scheduler,
+      );
+      this.plugin.qaCache.delete(file.path);
+      const done = this.dueCards.shift();
+      if (this.infiniteMode && done) this.dueCards.push(done);
+      this.plugin.updateBadge();
       this.sessionDone++;
       await this.next();
     };
@@ -241,7 +235,8 @@ export class AudioReviewView extends ItemView {
       // Marking backend failure mid-card: report and stop rather than record
       // a verdict that never happened.
       console.error("[iris-cards] audio review failed", e);
-      if (!this.closed && session === this.session) this.statusEl.setText("Audio review stopped — marking failed. Reopen to retry.");
+      const why = e instanceof Error ? e.message : String(e);
+      if (!this.closed && session === this.session) this.statusEl.setText(`Audio review stopped — marking failed: ${why}. Reopen to retry.`);
     }
   }
 }

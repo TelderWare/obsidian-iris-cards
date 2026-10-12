@@ -1,11 +1,12 @@
 ﻿import { ItemView, MarkdownRenderer, Notice, TFile, TFolder, WorkspaceLeaf, setIcon } from "obsidian";
 import type IrisCardsPlugin from "../main";
-import { getDueCards, getAllCards, getModules, getParentNoteName, cardHasTag, cardForgettingScore, getWaitingGroups } from "../scheduler";
-import { EXERCISE_TYPES, type QAVariant } from "../types/exercises";
+import { activeModuleFilter, getDueCards, getAllCards, getModules, getParentNoteName, cardHasTag, cardForgettingScore, getWaitingGroups } from "../scheduler";
+import { playFeedbackSound } from "./feedback-sound";
+import { openCardLibrary } from "./card-library";
+import { EXERCISE_TYPES, exerciseTypeLabel, type QAVariant } from "../types/exercises";
 import { renderCurrentCard, renderVariantInto, getParsedCached, invalidateParsedCache, type AnswerFn } from "./renderers";
-import { buildCardAuthorForm } from "./card-author";
+import { buildCardAuthorForm, variantFactText } from "./card-author";
 import { aiEnabled, llmMarkingEnabled } from "../ai";
-import { encodePairs } from "../generators/pairs";
 
 /**
  * Narrows a review session to a subset of cards: one note's cards, a single
@@ -13,24 +14,22 @@ import { encodePairs } from "../generators/pairs";
  * every note under a folder. `label` is what the tab title shows.
  */
 export interface ReviewScope {
-  kind: "note" | "card" | "tag" | "folder" | "table";
+  kind: "note" | "card" | "tag" | "folder";
   value: string;
   label: string;
+  /** Go through every card in scope once, due or not, in the order they were
+   * written, then stop — rather than the due queue or endless practice. */
+  runThrough?: boolean;
 }
 
-/**
- * One entry in the review queue. A fact card is just its file; a table row is
- * its table file plus the row's key-column value. Rows schedule through
- * TableStore, facts through CardStore — the queue interleaves both.
- */
+/** One entry in the review queue: a fact card's file. */
 export interface ReviewItem {
   file: TFile;
-  rowKey?: string;
 }
 
 /** Stable identity for per-item session maps (show counts, commits). */
 function itemKey(item: ReviewItem): string {
-  return item.rowKey ? `${item.file.path}\0row\0${item.rowKey}` : item.file.path;
+  return item.file.path;
 }
 
 /**
@@ -56,6 +55,9 @@ export class ReviewView extends ItemView {
   currentItem: ReviewItem | null = null;
   private doneCheckInterval: number | null = null;
   infiniteMode = false;
+  /** Set while working through the done card's "Write questions" list: facts
+   * with no questions get the write-your-own form even when AI is on. */
+  private writingQuestions = false;
   /** Per-item show count within the current infinite session. Each show
    * exponentially deprioritizes an item in the next pick so recently-shown
    * ones don't immediately re-appear. Reset on queue reload. */
@@ -146,8 +148,6 @@ export class ReviewView extends ItemView {
         });
       case "card":
         return files.filter(f => f.path === s.value);
-      case "table":
-        return []; // a table scope reviews rows only
       default:
         return files;
     }
@@ -229,47 +229,33 @@ export class ReviewView extends ItemView {
     }
   }
 
-  /** Whether table rows participate under the current scope, and with which
-   * tag/table filter. Note/folder/card scopes are card-shaped — rows sit them out. */
-  private rowScope(): { include: boolean; tag?: string; tablePath?: string } {
-    const s = this.reviewScope;
-    if (!s) return { include: true };
-    if (s.kind === "tag") return { include: true, tag: s.value };
-    if (s.kind === "table") return { include: true, tablePath: s.value };
-    return { include: false };
-  }
-
-  /** The due (or, in infinite mode, full) queue: fact cards plus table rows. */
+  /** The due (or, in infinite mode, full) queue. */
   private async fetchQueue(): Promise<ReviewItem[]> {
     // The module filter is an ambient default for the open-ended review. An
-    // explicit scope (a note, tag, folder, single card, or table the user
-    // picked) is a direct request for that content — honour it regardless of
-    // which modules happen to be filtered, or a module-less table/note the
-    // user explicitly asked to review would silently show nothing.
-    const mf = (!this.reviewScope && this.moduleFilter.size > 0) ? this.moduleFilter : undefined;
+    // explicit scope (a note, tag, folder, or single card the user picked) is
+    // a direct request for that content — honour it regardless of which
+    // modules happen to be filtered, or a module-less note the user
+    // explicitly asked to review would silently show nothing.
+    const mf = this.reviewScope ? undefined : activeModuleFilter(this.app, this.plugin.settings.cardsFolder, this.moduleFilter);
     const nf = this.reviewScope?.kind === "note" ? this.reviewScope.value : undefined;
     if (this.reviewScope?.kind === "card") {
       // A single-card practice session includes the card whether or not it's due.
       const file = this.app.vault.getAbstractFileByPath(this.reviewScope.value);
       return file instanceof TFile ? [{ file }] : [];
     }
+    if (this.reviewScope?.runThrough) {
+      // Card filenames are creation timestamps, so this is writing order.
+      const all = this.filterByScope(getAllCards(this.app, this.plugin.settings.cardsFolder, undefined, nf, true));
+      return all.sort((a, b) => a.basename.localeCompare(b.basename)).map(f => ({ file: f }));
+    }
     const facts = this.filterByScope(this.infiniteMode
       ? await getAllCards(this.app, this.plugin.settings.cardsFolder, mf, nf, true)
       : await getDueCards(this.app, this.plugin.settings.cardsFolder, 0, mf, this.plugin.settings.desiredRetention, nf));
-    const items: ReviewItem[] = facts.map(f => ({ file: f }));
-    // Table rows review as Pairs — the type filter treats them as such.
-    const rs = this.rowScope();
-    const rowsAllowed = rs.include && (this.typeFilter.size === 0 || this.typeFilter.has("Pairs"));
-    if (rowsAllowed) {
-      const rows = this.infiniteMode
-        ? await this.plugin.tableStore.allRows(this.plugin.settings.cardsFolder, mf, rs.tag)
-        : await this.plugin.tableStore.dueRows(this.plugin.settings.cardsFolder, this.plugin.settings.desiredRetention, mf, rs.tag);
-      items.push(...(rs.tablePath ? rows.filter(r => r.file.path === rs.tablePath) : rows));
-    }
-    return items;
+    return facts.map(f => ({ file: f }));
   }
 
   async loadDueCards(): Promise<void> {
+    this.writingQuestions = false;
     this.dueCards = await this.fetchQueue();
     this.sessionShowCount.clear();
     this.committedVariants.clear();
@@ -335,15 +321,14 @@ export class ReviewView extends ItemView {
     }
   }
 
-  /** FSRS forgetting probability for a queue item, whichever store owns it. */
+  /** FSRS forgetting probability for a queue item. */
   private itemForgettingScore(item: ReviewItem): number {
-    if (item.rowKey) return this.plugin.tableStore.rowForgettingScore(item.file.path, item.rowKey);
     return cardForgettingScore(this.app.metadataCache.getFileCache(item.file)?.frontmatter);
   }
 
   /** Weighted random pick by forgetting probability, discounted per session
    * show (halved per show, capped at 6) — same scheme as the audio view's
-   * weightedForgettingPick, generalized over fact-or-row items. */
+   * weightedForgettingPick. */
   private weightedPick(pool: ReviewItem[]): ReviewItem | null {
     if (pool.length === 0) return null;
     const scored = pool.map(item => {
@@ -398,7 +383,7 @@ export class ReviewView extends ItemView {
     if (this.plugin.settings.aiFeatures) {
       makeToggle("brain-circuit", "LLM marking", this.plugin.settings.autoMark, async (v) => {
         await this.plugin.updateSetting("autoMark", v);
-        if (this.currentItem && !this.currentItem.rowKey && this.currentVariant && this.currentCardEl && this.scrollBody) {
+        if (this.currentItem && this.currentVariant && this.currentCardEl && this.scrollBody) {
           if (!this.plugin.settings.anthropicApiKey && !(this.plugin.app as any).irisRelay) return;
           this.currentCardEl.remove();
           await renderCurrentCard(this, this.scrollBody, this.currentItem.file, this.currentVariant);
@@ -445,7 +430,7 @@ export class ReviewView extends ItemView {
       icon: "shapes",
       label: "Filter by question type",
       idPrefix: "iris-type",
-      items: EXERCISE_TYPES.map(t => ({ value: t, label: t })),
+      items: EXERCISE_TYPES.map(t => ({ value: t, label: exerciseTypeLabel(t) })),
       selected: this.typeFilter,
       onChange: async () => {
         this.plugin.settings.reviewTypeFilter = [...this.typeFilter];
@@ -457,13 +442,13 @@ export class ReviewView extends ItemView {
 
     const headerRight = header.createDiv({ cls: "iris-header-right" });
 
-    const browseBtn = headerRight.createEl("button", {
+    const libraryBtn = headerRight.createEl("button", {
       cls: "iris-toggle clickable-icon",
-      attr: { "aria-label": "Browse facts" },
+      attr: { "aria-label": "Card library" },
     });
-    setIcon(browseBtn, "book-open");
-    browseBtn.addEventListener("click", () => {
-      this.plugin.activateBrowseView();
+    setIcon(libraryBtn, "book-open");
+    libraryBtn.addEventListener("click", () => {
+      void openCardLibrary(this.plugin);
     });
 
     // Cache clear strips stored QA blocks so the AI can regenerate them. With
@@ -607,6 +592,7 @@ export class ReviewView extends ItemView {
   }
 
   renderDoneCard(): void {
+    this.writingQuestions = false;
     this.clearDoneCheck();
     this.ensureLayout();
     const body = this.scrollBody!;
@@ -630,19 +616,24 @@ export class ReviewView extends ItemView {
       const p = card.createEl("p", { text: `No folder named "${folderPath}" exists. Check the cards folder in ` });
       this.appendSettingsLink(p, "Iris Cards settings");
       p.appendText(".");
-    } else if (getAllCards(this.app, folderPath).length === 0
-        && this.plugin.tableStore.cachedTables(folderPath).length === 0) {
+    } else if (getAllCards(this.app, folderPath).length === 0) {
       card.createEl("h2", { text: "No cards yet" });
       card.createEl("p", { text: `The folder "${folderPath}" doesn't contain any cards.` });
+    } else if (this.reviewScope?.runThrough) {
+      card.createEl("p", { text: `Finished every card from ${this.reviewScope.label}.` });
+      this.scrollToCenter(card);
+      // A run-through is one pass. Polling would refill the queue with the
+      // same cards and start it over.
+      return;
     } else {
       card.createEl("p", { text: "No cards due for review." });
       void this.renderWaitingGroups(card);
-      void this.renderOrphanedState(card);
+      void this.renderUnwrittenFacts(card);
     }
 
     this.scrollToCenter(card);
 
-    // Poll for newly due cards and table rows
+    // Poll for newly due cards
     this.doneCheckInterval = window.setInterval(async () => {
       const items = await this.fetchQueue();
       if (items.length > 0) {
@@ -655,30 +646,16 @@ export class ReviewView extends ItemView {
   }
 
   /**
-   * Groups with facts still waiting to be started — and tables with rows not
-   * yet introduced — shown on the done card so new material is pulled in when
-   * the user has capacity, never pushed by a heuristic. Starting a group
-   * member clears its `waiting` flag; starting a table row creates its state
-   * block. Either way the new item is never-reviewed, so it's due immediately.
+   * Groups with facts still waiting to be started, shown on the done card so
+   * new material is pulled in when the user has capacity, never pushed by a
+   * heuristic. Starting a group member clears its `waiting` flag; the new
+   * item is never-reviewed, so it's due immediately.
    */
   private async renderWaitingGroups(card: HTMLElement): Promise<void> {
     const groups = getWaitingGroups(this.app, this.plugin.settings.cardsFolder);
-    const tables = await this.plugin.tableStore.waitingTables(this.plugin.settings.cardsFolder);
-    if (groups.length === 0 && tables.length === 0) return;
+    if (groups.length === 0) return;
     const wrap = card.createDiv({ cls: "iris-waiting-groups" });
     wrap.createDiv({ cls: "iris-waiting-title", text: "Waiting to be started" });
-
-    for (const t of tables) {
-      const row = wrap.createDiv({ cls: "iris-waiting-row" });
-      row.createSpan({ cls: "iris-waiting-name", text: `${t.name} — ${t.started} of ${t.total} started (next: ${t.nextKey})` });
-      const btn = row.createEl("button", { cls: "iris-waiting-start", text: "Start next" });
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        await this.plugin.tableStore.introduceNext(t.file);
-        this.plugin.updateBadge();
-        await this.loadDueCards();
-      });
-    }
 
     for (const g of groups) {
       const row = wrap.createDiv({ cls: "iris-waiting-row" });
@@ -711,36 +688,36 @@ export class ReviewView extends ItemView {
   }
 
   /**
-   * Table state blocks whose key no longer matches any row (usually the row's
-   * key value was renamed). Never auto-matched — the user says which row the
-   * history belongs to; relink targets are limited to rows without state.
+   * Started facts that have no reviewable questions yet — offered on
+   * the done card so you can write them when you have time, rather than only
+   * when each one happens to come due. Uses the same scope as the queue.
    */
-  private async renderOrphanedState(card: HTMLElement): Promise<void> {
-    const orphans = await this.plugin.tableStore.orphanedState(this.plugin.settings.cardsFolder);
-    if (orphans.length === 0) return;
-    const wrap = card.createDiv({ cls: "iris-waiting-groups iris-orphan-state" });
-    wrap.createDiv({ cls: "iris-waiting-title", text: "Table state without a matching row" });
-    for (const o of orphans) {
-      const row = wrap.createDiv({ cls: "iris-waiting-row" });
-      row.createSpan({ cls: "iris-waiting-name", text: `${o.name} — "${o.orphanKey}"` });
-      if (o.candidates.length === 0) {
-        row.createSpan({ cls: "iris-orphan-hint", text: "no un-started rows to relink to" });
-        continue;
-      }
-      const select = row.createEl("select", { cls: "dropdown" });
-      for (const c of o.candidates) select.createEl("option", { text: c, attr: { value: c } });
-      const btn = row.createEl("button", { cls: "iris-waiting-start", text: "Relink" });
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        const ok = await this.plugin.tableStore.relinkRow(o.file, o.orphanKey, select.value);
-        if (ok) {
-          this.plugin.updateBadge();
-          await this.loadDueCards();
-        } else {
-          btn.disabled = false;
-        }
-      });
+  private async renderUnwrittenFacts(card: HTMLElement): Promise<void> {
+    if (this.reviewScope?.kind === "card") return;
+    const mf = this.reviewScope ? undefined : activeModuleFilter(this.app, this.plugin.settings.cardsFolder, this.moduleFilter);
+    const nf = this.reviewScope?.kind === "note" ? this.reviewScope.value : undefined;
+    const files = this.filterByScope(getAllCards(this.app, this.plugin.settings.cardsFolder, mf, nf, true));
+    const unwritten: ReviewItem[] = [];
+    for (const file of files) {
+      let variants: QAVariant[] = [];
+      try {
+        variants = (await getParsedCached(this.app, file)).variants;
+      } catch { /* unreadable card — treated as having no variants */ }
+      if (!variants.some(v => !v.suspended && !v.rephrase)) unwritten.push({ file });
     }
+    if (unwritten.length === 0) return;
+
+    const wrap = card.createDiv({ cls: "iris-waiting-groups" });
+    const row = wrap.createDiv({ cls: "iris-waiting-row" });
+    const n = unwritten.length;
+    row.createSpan({ cls: "iris-waiting-name", text: `${n} fact${n === 1 ? " has" : "s have"} no questions yet` });
+    const btn = row.createEl("button", { cls: "iris-waiting-start", text: "Write questions" });
+    btn.addEventListener("click", async () => {
+      this.clearDoneCheck();
+      this.writingQuestions = true;
+      this.dueCards = unwritten;
+      await this.showNextCard();
+    });
   }
 
   /** Append a link that opens this plugin's settings tab. */
@@ -793,9 +770,8 @@ export class ReviewView extends ItemView {
     const ai = aiEnabled(this.plugin);
     const apiKey = this.plugin.settings.anthropicApiKey;
 
-    // Pregenerate next card while user works on current one (facts only —
-    // table rows need no generation, their content is the table itself)
-    if (ai && this.dueCards.length > 1 && !this.dueCards[1].rowKey) {
+    // Pregenerate next card while user works on current one
+    if (ai && !this.writingQuestions && this.dueCards.length > 1) {
       this.plugin.pregen.pregenerateQA(this.dueCards[1].file, apiKey, 2);
     }
 
@@ -804,20 +780,16 @@ export class ReviewView extends ItemView {
     // whatever was there, answered cards included.
     body.empty();
 
-    if (item.rowKey) {
-      await this.renderRowCard(item);
-      return;
-    }
     const cardFile = item.file;
 
-    if (!ai) {
+    if (!ai || this.writingQuestions) {
       // AI off: render straight from the variants stored on the card — no
       // API key needed, no generation cache.
       let variants: QAVariant[] = [];
       try {
         variants = (await getParsedCached(this.app, cardFile)).variants;
       } catch { /* unreadable card — treated as having no variants */ }
-      const active = variants.filter(v => !v.suspended);
+      const active = variants.filter(v => !v.suspended && !v.rephrase);
       const variant = this.commitVariantFor(cardFile, active);
       if (!variant) {
         if (this.typeFilter.size > 0 && active.length > 0) {
@@ -856,7 +828,7 @@ export class ReviewView extends ItemView {
     loadingCard.remove();
 
     // Pool reviewable variants
-    const active = variants.filter(v => !v.suspended);
+    const active = variants.filter(v => !v.suspended && !v.rephrase);
     const variant = this.commitVariantFor(cardFile, active);
     if (!variant) {
       // No usable variants (generation failed with no fallback, or all suspended) — skip this card
@@ -884,11 +856,14 @@ export class ReviewView extends ItemView {
     const card = body.createDiv({ cls: "iris-card iris-author-card" });
     this.currentCardEl = card;
 
-    // No header question and no divider: the fact is the first thing on the
-    // card, and a form with a type control already asks "how should this quiz
-    // you?" without a sentence saying so. Later/discard live in the footer
-    // beside Save (built below, once the form exists to host them).
-    const headerBtns = createDiv({ cls: "iris-author-header-btns" });
+    // Laid out like the Create card / Edit card modals, which host the same
+    // form: a title saying what to do, then the content, then the form with
+    // just the type picker and Save in its footer. Later/trash are about this
+    // card in the queue, not the question being written, so they sit by the
+    // title — where a modal keeps its close button — not in the Save row.
+    const titleRow = card.createDiv({ cls: "iris-author-titlerow" });
+    const titleEl = titleRow.createDiv({ cls: "iris-author-title" });
+    const headerBtns = titleRow.createDiv({ cls: "iris-author-header-btns" });
     const laterBtn = headerBtns.createEl("button", { cls: "iris-author-later", text: "Later" });
 
     // A junk capture shouldn't cycle forever — trash it here. Two clicks so a
@@ -922,9 +897,15 @@ export class ReviewView extends ItemView {
     });
 
     let factBody = "";
+    let variants: QAVariant[] = [];
     try {
-      factBody = (await getParsedCached(this.app, cardFile)).body;
-    } catch { /* body stays empty */ }
+      const parsed = await getParsedCached(this.app, cardFile);
+      factBody = parsed.body;
+      variants = parsed.variants;
+    } catch { /* body and variants stay empty */ }
+    // A card lands here with questions when none are reviewable: flagged for a
+    // rewrite (the Cheated button, with no AI to do it) or all suspended.
+    const flagged = variants.filter(v => v.rephrase && !v.suspended);
     // The "(Context: …)" breadcrumb is separated from the fact itself: it
     // orients you no matter which type is selected, while the sentence below
     // it is what Cloze takes over.
@@ -932,6 +913,20 @@ export class ReviewView extends ItemView {
     const contextLines = factBody.split("\n").filter(isContext);
     const factRest = factBody.split("\n").filter(l => !isContext(l)).join("\n").trim();
     const seedText = factSentence(factRest);
+    // With no fact text, an existing question is the only record of what the
+    // card is about — show one so there's something to write from. The
+    // flagged one first: it's the question being replaced.
+    let example: string | null = null;
+    if (!factRest) {
+      for (const v of [...flagged, ...variants.filter(v => !flagged.includes(v))]) {
+        example = variantFactText(this.app, this.plugin, v);
+        if (example) break;
+      }
+    }
+    titleEl.setText(
+      flagged.length > 0 ? "Write a replacement question"
+      : variants.length > 0 ? "Write a new question"
+      : "Write a question");
     if (contextLines.length > 0) {
       const ctxEl = card.createDiv({ cls: "iris-author-context" });
       await MarkdownRenderer.render(this.app, contextLines.join("\n"), ctxEl, cardFile.path, this);
@@ -940,6 +935,11 @@ export class ReviewView extends ItemView {
     if (factRest) {
       factEl = card.createDiv({ cls: "iris-author-fact" });
       await MarkdownRenderer.render(this.app, factRest, factEl, cardFile.path, this);
+    } else if (example) {
+      const exEl = card.createDiv({ cls: "iris-author-fact iris-author-example" });
+      exEl.createDiv({ cls: "iris-author-example-label", text: flagged.length > 0 ? "Question to replace" : "Existing question" });
+      const exBody = exEl.createDiv();
+      await MarkdownRenderer.render(this.app, example, exBody, cardFile.path, this);
     }
 
     buildCardAuthorForm(card, {
@@ -957,7 +957,6 @@ export class ReviewView extends ItemView {
       // The fact's own sentence, minus the "(Context: …)" breadcrumb, so a
       // Cloze starts as the fact itself rather than an empty box.
       seedText,
-      buildSecondaryActions: (host) => host.appendChild(headerBtns),
       onSave: async (authored) => {
         await this.plugin.cardStore.updateVariants(cardFile, (vs) => { vs.push(authored.variant); });
         invalidateParsedCache(cardFile.path);
@@ -987,50 +986,9 @@ export class ReviewView extends ItemView {
     return this.audioCtx;
   }
 
-  private playChime(): void {
-    try {
-      const ctx = this.getOrCreateAudioCtx();
-      const now = ctx.currentTime;
-      for (const [freq, onset, dur] of [[523.25, 0, 0.12], [783.99, 0.06, 0.18]] as const) {
-        const osc = ctx.createOscillator();
-        osc.type = "sine";
-        osc.frequency.value = freq;
-        const g = ctx.createGain();
-        g.gain.setValueAtTime(0.0001, now + onset);
-        g.gain.exponentialRampToValueAtTime(0.18, now + onset + 0.008);
-        g.gain.exponentialRampToValueAtTime(0.0001, now + onset + dur);
-        osc.connect(g).connect(ctx.destination);
-        osc.start(now + onset);
-        osc.stop(now + onset + dur);
-      }
-    } catch { /* ignore */ }
-  }
-
-  private playBuzz(): void {
-    try {
-      const ctx = this.getOrCreateAudioCtx();
-      const now = ctx.currentTime;
-      const dur = 0.12;
-      const osc = ctx.createOscillator();
-      osc.type = "square";
-      osc.frequency.value = 220;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.25, now + 0.005);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + dur);
-    } catch { /* ignore */ }
-  }
-
   playFeedback(correct: boolean, record?: boolean): void {
     if (this.plugin.settings.soundFeedback) {
-      if (correct) {
-        this.playChime();
-      } else {
-        this.playBuzz();
-      }
+      playFeedbackSound(this.getOrCreateAudioCtx(), correct);
     }
 
     if (this.plugin.settings.flashFeedback) {
@@ -1088,9 +1046,10 @@ export class ReviewView extends ItemView {
     this.clearCommit(file.path);
     if (questionShown) this.renderStateCache.delete(file.path + "\0" + questionShown);
 
-    // Skip recording when the user peeked (not a genuine review) or when infinite
-    // mode is on (infinite mode is for practice; nothing feeds back into FSRS).
-    if (!this.peekedAnswer && !this.infiniteMode) {
+    // Skip recording only when the user peeked (not a genuine review). Infinite
+    // mode records like any review: FSRS discounts early reviews itself, so
+    // cramming gains little stability while the extra data still sharpens it.
+    if (!this.peekedAnswer) {
       try {
         await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs, gapTerm, grade, this.plugin.settings.cardsFolder, this.plugin.settings.desiredRetention, this.plugin.settings.scheduler);
         for (const other of this.plugin.reviewViews) {
@@ -1111,110 +1070,6 @@ export class ReviewView extends ItemView {
     await this.advanceAfterRate(file);
   }
 
-  /** Row counterpart of rateCard — records through TableStore. */
-  private async rateRow(item: ReviewItem, correct: boolean, grade: number | undefined, elapsedMs: number, questionShown: string): Promise<void> {
-    this.freezeCurrentCard();
-    // Clear the presentation state so the next showing picks fresh sides.
-    this.renderStateCache.delete(item.file.path + "\0" + questionShown);
-
-    if (!this.peekedAnswer && !this.infiniteMode) {
-      // Same contract as rateCard: an unwritable table must not strand the row.
-      try {
-        await this.plugin.tableStore.recordRowReview(
-          item.file, item.rowKey!, correct, grade, elapsedMs,
-          this.plugin.settings.desiredRetention,
-        );
-      } catch (e) {
-        console.error("[iris-cards] failed to record row review", item.file.path, e);
-        new Notice(`Couldn't record this review — ${item.file.basename} may be malformed. Skipping it.\n${e instanceof Error ? e.message : String(e)}`, 8000);
-      }
-    }
-
-    await this.advanceAfterRate();
-  }
-
-  /**
-   * Present a table row as a Pairs exercise synthesized from its columns —
-   * show one column, ask another, with the usual typed input / manual reveal
-   * behavior. Scheduling flows through TableStore, not CardStore.
-   */
-  private async renderRowCard(item: ReviewItem): Promise<void> {
-    const body = this.scrollBody!;
-    const table = await this.plugin.tableStore.getTable(item.file);
-    const row = table?.rows.find(r => r.key === item.rowKey);
-    // Columns to keep out of the quiz: the table's own no-quiz: list, plus the
-    // ordering column when the global "don't quiz a table's ordering column"
-    // setting is on (a sort key like Mass usually isn't worth recalling).
-    const excluded = new Set(table?.noQuiz ?? []);
-    if (this.plugin.settings.noQuizOrderColumn && table?.orderBy) excluded.add(table.orderBy);
-    const fields = table && row
-      ? table.columns
-        .filter(c => !excluded.has(c) && (row.cells[c] ?? "").trim())
-        .map(c => ({ name: c, content: row.cells[c].trim() }))
-      : [];
-    if (!table || !row || fields.length < 2) {
-      // Row vanished, has a single filled cell, or every non-order-only column
-      // is empty — nothing quizzable, so skip it.
-      this.dueCards.shift();
-      await this.showNextCard();
-      return;
-    }
-
-    const st = table.state.get(row.key);
-    const e = encodePairs(fields);
-    const variant: QAVariant = {
-      exerciseType: "Pairs",
-      question: e.question,
-      answer: e.answer,
-      acceptedAnswers: [],
-      knownIncorrect: [],
-      lastReviewed: st?.lastReviewed ?? null,
-      suspended: false,
-      recordMs: null,
-      difficulty: st?.difficulty ?? null,
-    };
-    this.currentVariant = variant;
-
-    const card = body.createDiv({ cls: "iris-card" });
-    this.currentCardEl = card;
-
-    const t0 = performance.now();
-    const answer: AnswerFn = async (correct, _userAnswer, _gapTerm, grade) => {
-      await this.rateRow(item, correct, grade, Math.round(performance.now() - t0), variant.question);
-    };
-    await renderVariantInto(this, card, item.file, variant, answer);
-
-    // Suspend button — retires this row from review (Suspended in its state block)
-    const suspendBtn = card.createEl("button", {
-      cls: "iris-card-icon iris-suspend-btn",
-      attr: { "aria-label": "Suspend row" },
-    });
-    setIcon(suspendBtn, "eye-off");
-    suspendBtn.addEventListener("click", async () => {
-      await this.plugin.tableStore.suspendRow(item.file, item.rowKey!);
-      this.plugin.updateBadge();
-      // Only advance if this row is still the current head — the button stays
-      // clickable on a frozen answered card, which has already left the queue.
-      if (this.dueCards[0] && itemKey(this.dueCards[0]) === itemKey(item)) {
-        this.dueCards.shift();
-        await this.showNextCard();
-      }
-    });
-
-    // Table button — opens the table file (peek: the full table is the answer)
-    const tableBtn = card.createEl("button", {
-      cls: "iris-card-icon iris-card-file-btn",
-      attr: { "aria-label": "Open table" },
-    });
-    setIcon(tableBtn, "table");
-    tableBtn.addEventListener("click", () => {
-      this.peekedAnswer = true;
-      this.app.workspace.getLeaf("tab").openFile(item.file);
-    });
-
-    this.scrollToCenter(card);
-  }
-
   private burySiblings(reviewedFile: TFile): void {
     const cache = this.app.metadataCache.getFileCache(reviewedFile);
     const parentNote = getParentNoteName(cache?.frontmatter);
@@ -1227,7 +1082,7 @@ export class ReviewView extends ItemView {
     const others: ReviewItem[] = [];
     const siblings: ReviewItem[] = [];
     for (const item of this.dueCards.slice(1)) {
-      const fm = item.rowKey ? undefined : this.app.metadataCache.getFileCache(item.file)?.frontmatter;
+      const fm = this.app.metadataCache.getFileCache(item.file)?.frontmatter;
       if (getParentNoteName(fm) === parentNote) {
         siblings.push(item);
       } else {
@@ -1243,9 +1098,9 @@ export class ReviewView extends ItemView {
   async handleExternalRate(file: TFile): Promise<void> {
     this.plugin.qaCache.delete(file.path);
     this.clearCommit(file.path);
-    const idx = this.dueCards.findIndex(i => !i.rowKey && i.file.path === file.path);
+    const idx = this.dueCards.findIndex(i => i.file.path === file.path);
     if (idx === -1) return;
-    if (idx === 0 && this.currentItem && !this.currentItem.rowKey && this.currentItem.file.path === file.path) {
+    if (idx === 0 && this.currentItem && this.currentItem.file.path === file.path) {
       this.dueCards.shift();
       this.plugin.updateBadge();
       await this.showNextCard();

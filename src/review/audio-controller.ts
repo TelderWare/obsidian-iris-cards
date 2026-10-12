@@ -43,13 +43,13 @@ function downsampleFloat(input: Float32Array, srcRate: number, dstRate: number):
 import { normalizeAnswer } from "../utils/text";
 import { aiEnabled } from "../ai";
 import { markAnswer } from "../generators/qa";
+import { playFeedbackSound } from "./feedback-sound";
 
 /**
  * An explicit give-up ("I don't know", "pass"). Matched against the whole
  * utterance (after stripping leading fillers), never as a substring — "I don't
  * know, maybe Artemis?" is an attempt and still goes to marking. Give-ups skip
- * the LLM judge (there's nothing to judge) and skip the spoken "Incorrect." —
- * the reviewer goes straight to the answer.
+ * the LLM judge (there's nothing to judge).
  */
 const GIVE_UP_PHRASES = new Set([
   "i dont know", "dont know", "i dunno", "dunno", "no idea", "i have no idea",
@@ -96,20 +96,6 @@ type AnswerFn = (correct: boolean, userAnswer?: string) => Promise<void>;
 type PrewarmNextFn = () => string | null | Promise<string | null>;
 
 const TTS_CACHE_MAX = 50;
-
-/** Spoken feedback for a correct answer — one is picked at random per card.
- * Kept short: each distinct phrase costs TTS credits once per session before
- * the cache takes over. */
-const CORRECT_MESSAGES = [
-  "Correct!",
-  "That's right!",
-  "Exactly.",
-  "Well done!",
-  "Spot on.",
-  "Nailed it.",
-  "Perfect.",
-  "Yes, that's it.",
-];
 
 interface CacheEntry {
   /** Decoded audio buffer — ready to play, no decode cost. */
@@ -220,14 +206,9 @@ export class AudioReviewController {
 
     if (this.aborted) return;
 
-    // Prewarm both possible result TTS clips in the background while the user
-    // speaks. By the time we know correct/incorrect, the audio is decoded and
-    // ready. The correct message is picked per card, before prewarming, so the
-    // clip fetched is the one that plays.
+    // Prewarm the answer readout in the background while the user speaks, so
+    // if they get it wrong it plays without a TTS round trip.
     const correctAnswerText = `The answer is: ${answerTextForAudio(variant)}`;
-    const correctText = CORRECT_MESSAGES[Math.floor(Math.random() * CORRECT_MESSAGES.length)];
-    this.prewarmTTS(correctText);
-    this.prewarmTTS("Incorrect.");
     this.prewarmTTS(correctAnswerText);
 
     // Stream answer via WebSocket STT.
@@ -257,9 +238,7 @@ export class AudioReviewController {
     }
 
     // Evaluate answer. An explicit give-up is wrong by definition — no LLM
-    // judgment needed, and no "Incorrect." announcement either (hearing
-    // "Incorrect" after saying "I don't know" is grating); we go straight to
-    // speaking the answer. Guard: if the card's accepted answer IS a give-up
+    // judgment needed. Guard: if the card's accepted answer IS a give-up
     // phrase ("pass", "skip"), the exact match wins.
     const gaveUp = isGiveUp(spoken) && !this.matchesAccepted(spoken, variant);
     const result = gaveUp ? { correct: false } : await this.evaluateAnswer(spoken, variant);
@@ -276,18 +255,15 @@ export class AudioReviewController {
         .catch(() => { /* best effort */ });
     }
 
-    // IMPORTANT: speak the result + correct answer BEFORE calling answerFn.
-    // answerFn -> rateCard -> showNextCard -> next card's start() begins, and
-    // we need the current card's speech to be fully done first or the two
-    // cards' TTS will overlap on the same AudioContext.
+    // IMPORTANT: play the result + speak the correct answer BEFORE calling
+    // answerFn. answerFn -> rateCard -> showNextCard -> next card's start()
+    // begins, and we need the current card's audio to be fully done first or
+    // the two cards' audio will overlap on the same AudioContext.
+    // The result is the same chime / buzz as the visual review, not speech.
     this.setState("speaking-result");
-    if (!gaveUp) {
-      const resultText = result.correct ? correctText : "Incorrect.";
-      this.setStatus(resultText);
-      try {
-        await this.speakText(resultText);
-      } catch { /* non-fatal */ }
-    }
+    this.setStatus(result.correct ? "Correct" : "Incorrect");
+    const soundMs = playFeedbackSound(this.getAudioCtx(), result.correct);
+    await new Promise(r => setTimeout(r, soundMs + 150));
 
     if (this.aborted) return;
 
@@ -301,7 +277,7 @@ export class AudioReviewController {
 
     if (this.aborted) return;
 
-    // Brief beat between "Correct!" and the next question, for cadence.
+    // Brief beat between the result and the next question, for cadence.
     this.setState("advancing");
     this.setStatus("");
     await new Promise(r => setTimeout(r, this.plugin.settings.audioAutoAdvanceMs));
@@ -486,7 +462,7 @@ export class AudioReviewController {
   private async getDecodedTTS(text: string): Promise<AudioBuffer> {
     const existing = this.ttsCache.get(text);
     if (existing?.audioBuffer) {
-      // Move to end so frequently-reused clips (Correct!/Incorrect.) survive eviction.
+      // Move to end so frequently-reused clips survive eviction.
       this.ttsCache.delete(text);
       this.ttsCache.set(text, existing);
       return existing.audioBuffer;
