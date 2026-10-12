@@ -96,6 +96,8 @@ interface AuthorCtx {
 interface AuthorTypeDef {
   id: string;
   label: string;
+  /** Left out of the type picker except when editing a variant of this type. */
+  editOnly?: boolean;
   /** Render the type's fields; when `initial` is given, pre-fill from it. */
   build(fields: HTMLElement, initial: QAVariant | undefined, ctx: AuthorCtx): Collect;
 }
@@ -113,7 +115,7 @@ export function editableTypeId(variant: QAVariant): string | null {
       case "Pairs": decodePairs(variant.question); return "pairs";
       case "True/False": return decodeTFPair(variant.question) ? "tf" : null;
       case "Multiple Choice": return decodeMC(variant.question, variant.answer).options.length >= 2 ? "mc" : null;
-      case "Rank": decodeRank(variant.question, variant.answer); return "series";
+      case "Rank": decodeRank(variant.question, variant.answer); return "order";
       case "Multi-step": decodeMultiStep(variant.question); return "multistep";
       case "Match": decodeMatch(variant.question); return "match";
       case "List": decodeList(variant.question, variant.answer); return "list";
@@ -253,6 +255,15 @@ function syncImagePreviews(app: App, field: HTMLTextAreaElement | HTMLInputEleme
   }
   if (strip.childElementCount === 0) strip.remove();
 }
+
+/** A type's text fields, skipping any it has hidden (e.g. Order's unused title or property). */
+function visibleInputs(el: HTMLElement): (HTMLInputElement | HTMLTextAreaElement)[] {
+  return Array.from(el.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"))
+    .filter(i => !i.closest(".iris-hidden"));
+}
+
+/** Remembered last-used type ids that have since been folded into another type. */
+const RETIRED_TYPE_IDS: Record<string, string> = { series: "order", synonym: "pairs" };
 
 // ─── Type definitions ───────────────────────────────────────────────────
 
@@ -551,30 +562,72 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     },
   },
   {
-    id: "series",
-    label: "Property series",
+    id: "order",
+    label: "Order",
     build(fields, initial) {
+      // One form for two stored types that are both an ordered list: a
+      // process's steps (Place in Order) and items ranked along a property
+      // (Rank). Only the question asked of the list differs.
+      const kindField = fields.createDiv({ cls: "iris-author-field" });
+      const kind = kindField.createEl("select", { cls: "dropdown iris-author-order-kind" });
+      kind.setAttr("aria-label", "What kind of order");
+      kind.createEl("option", { text: "Steps of a process", attr: { value: "steps" } });
+      kind.createEl("option", { text: "Ranked by a property", attr: { value: "rank" } });
+      const title = addText(fields, "Process", "Steps of mitosis");
       const prop = addText(fields, "Property (adjective)", "electronegative");
-      const items = addTextArea(fields, "Items, least → most (one per line)", {
-        multiline: true,
-        hint: "Reviews ask \"which is more/less [property]?\" — and with 3+ items, \"place these in order\".",
+      const items = addTextArea(fields, "Items, in order (one per line)", { multiline: true });
+      const hint = items.parentElement!.createDiv({ cls: "iris-author-hint" });
+
+      const showKind = () => {
+        const rank = kind.value === "rank";
+        title.parentElement!.toggleClass("iris-hidden", rank);
+        prop.parentElement!.toggleClass("iris-hidden", !rank);
+        items.placeholder = rank ? "Items, least → most (one per line)" : "Steps, in the correct order (one per line)";
+        hint.setText(rank
+          ? "Reviews ask \"which is more/less [property]?\" — and with 3+ items, \"place these in order\"."
+          : "Shown shuffled, so no step may give away its position — avoid \"then\", \"finally\", \"repeat the above\".");
+      };
+      kind.addEventListener("change", () => {
+        showKind();
+        (kind.value === "rank" ? prop : title).focus();
       });
+
       if (initial) {
         try {
-          const r = decodeRank(initial.question, initial.answer);
-          prop.value = r.property;
-          items.value = r.items.join("\n");
+          if (initial.exerciseType === "Rank") {
+            const r = decodeRank(initial.question, initial.answer);
+            kind.value = "rank";
+            prop.value = r.property;
+            items.value = r.items.join("\n");
+          } else {
+            const os = decodeOrderSteps(initial.question, initial.answer);
+            title.value = os.title;
+            items.value = os.steps.join("\n");
+          }
         } catch { /* vetted by editableTypeId */ }
       }
+      showKind();
+
       return () => {
-        const property = prop.value.trim();
-        const list = items.value.split("\n").map(l => l.trim()).filter(Boolean);
-        if (!property) return "A property adjective is required.";
-        if (list.length < 2) return "At least two items are required.";
-        const e = encodeRank({ property, items: list });
+        const list = lines(items.value);
+        if (kind.value === "rank") {
+          const property = prop.value.trim();
+          if (!property) return "A property adjective is required.";
+          if (list.length < 2) return "At least two items are required.";
+          const e = encodeRank({ property, items: list });
+          return {
+            variant: mkVariant("Rank", e.question, e.answer),
+            factText: `In order of ${property} (least → most): ${list.join(", ")}`,
+          };
+        }
+        const t = title.value.trim();
+        if (!t) return "A process name is required.";
+        // Two steps shuffle into the right order half the time — not an exercise.
+        if (list.length < 3) return "Ordering needs at least three steps.";
+        const e = encodeOrderSteps({ title: t, steps: list });
         return {
-          variant: mkVariant("Rank", e.question, e.answer),
-          factText: `In order of ${property} (least → most): ${list.join(", ")}`,
+          variant: mkVariant("Place in Order", e.question, e.answer),
+          factText: `${t}: ${list.join(" → ")}`,
         };
       };
     },
@@ -734,36 +787,6 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     },
   },
   {
-    id: "order",
-    label: "Place in order",
-    build(fields, initial) {
-      const title = addText(fields, "Process", "Steps of mitosis");
-      const steps = addTextArea(fields, "Steps, in the correct order (one per line)", {
-        multiline: true,
-        hint: "Shown shuffled, so no step may give away its position — avoid \"then\", \"finally\", \"repeat the above\".",
-      });
-      if (initial) {
-        try {
-          const os = decodeOrderSteps(initial.question, initial.answer);
-          title.value = os.title;
-          steps.value = os.steps.join("\n");
-        } catch { /* vetted by editableTypeId */ }
-      }
-      return () => {
-        const t = title.value.trim();
-        const list = lines(steps.value);
-        if (!t) return "A process name is required.";
-        // Two steps shuffle into the right order half the time — not an exercise.
-        if (list.length < 3) return "Ordering needs at least three steps.";
-        const e = encodeOrderSteps({ title: t, steps: list });
-        return {
-          variant: mkVariant("Place in Order", e.question, e.answer),
-          factText: `${t}: ${list.join(" → ")}`,
-        };
-      };
-    },
-  },
-  {
     id: "mistake",
     label: "Correct the mistake",
     build(fields, initial) {
@@ -793,6 +816,9 @@ const TYPE_DEFS: AuthorTypeDef[] = [
   {
     id: "synonym",
     label: "Alternate name",
+    // New alternate names are double-sided cards; this stays only so
+    // existing Synonym variants can still be edited.
+    editOnly: true,
     build(fields, initial) {
       const term = addText(fields, "Term", "Krebs cycle");
       const alt = addText(fields, "Alternate name", "citric acid cycle");
@@ -913,12 +939,12 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
   const actions = form.createDiv({ cls: "iris-author-actions" });
   const typeSelect = actions.createEl("select", { cls: "dropdown iris-author-type" });
   typeSelect.setAttr("aria-label", "Card type");
-  for (const def of TYPE_DEFS) {
+  const prefillTypeId = opts.initial ? editableTypeId(opts.initial) : null;
+  const offered = TYPE_DEFS.filter(d => !d.editOnly || d.id === prefillTypeId);
+  for (const def of offered) {
     typeSelect.createEl("option", { text: def.label, attr: { value: def.id } });
   }
   const saveBtn = actions.createEl("button", { cls: "iris-author-save", text: opts.saveLabel ?? "Save card" });
-
-  const prefillTypeId = opts.initial ? editableTypeId(opts.initial) : null;
 
   // Each type's fields are built once and kept alive behind the picker, so
   // switching type never discards anything already typed.
@@ -941,7 +967,7 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
     active = entry;
     // Heights measure as 0 while hidden — grow now that the fields are visible.
     for (const ta of Array.from(entry.el.querySelectorAll("textarea"))) autoGrow(ta);
-    const inputs = Array.from(entry.el.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"));
+    const inputs = visibleInputs(entry.el);
     // Prefilled fields (editing an existing card) never fire input, so seed
     // their thumbnails here.
     for (const i of inputs) syncImagePreviews(opts.app, i);
@@ -951,7 +977,7 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
   };
 
   typeSelect.addEventListener("change", () => {
-    const def = TYPE_DEFS.find(d => d.id === typeSelect.value);
+    const def = offered.find(d => d.id === typeSelect.value);
     if (def) selectType(def);
   });
 
@@ -988,7 +1014,7 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
     if (!(t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement)) return;
     if (t.dataset.multiline) return; // list-entry field: Enter makes a newline
     e.preventDefault();
-    const inputs = active ? Array.from(active.el.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")) : [];
+    const inputs = active ? visibleInputs(active.el) : [];
     const idx = inputs.indexOf(t);
     const rest = idx >= 0 ? inputs.slice(idx + 1) : [];
     // When everything after the cursor is empty and the card is already
@@ -1023,7 +1049,8 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
     });
   });
 
-  const initial = TYPE_DEFS.find(d => d.id === (prefillTypeId ?? opts.initialTypeId)) ?? TYPE_DEFS[0];
+  const lastTypeId = opts.initialTypeId && (RETIRED_TYPE_IDS[opts.initialTypeId] ?? opts.initialTypeId);
+  const initial = offered.find(d => d.id === (prefillTypeId ?? lastTypeId)) ?? offered[0];
   selectType(initial);
 }
 
