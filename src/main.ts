@@ -8,7 +8,7 @@ import {
 import { IrisCardsSettingTab, DEFAULT_SETTINGS, FSRS_MIN_SAMPLES, FSRS_AUTO_REFIT_NEW_SAMPLES } from "./settings";
 import type { IrisCardsSettings } from "./settings";
 import { ReviewView, VIEW_TYPE_REVIEW, type ReviewScope } from "./review/review-view";
-import { registerCardLibrary, openCardLibrary } from "./review/card-library";
+import { openCardLibrary } from "./review/card-library";
 import { AudioReviewView, VIEW_TYPE_AUDIO } from "./review/audio-view";
 import { activeModuleFilter, countDueFromCache, estimateDueMinutes, getParentNoteName, setFSRSWeights } from "./scheduler";
 import { collectCardLogs, countSamples, optimizeFSRS } from "./fsrs-optimizer";
@@ -45,8 +45,6 @@ export default class IrisCardsPlugin extends Plugin {
       VIEW_TYPE_REVIEW,
       (leaf: WorkspaceLeaf) => new ReviewView(leaf, this),
     );
-
-    registerCardLibrary(this);
 
     this.registerView(
       VIEW_TYPE_AUDIO,

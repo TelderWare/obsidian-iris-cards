@@ -3,9 +3,18 @@
   position: relative;
 }
 
-/* Clickable "saved as card" toast */
-.iris-notice-clickable {
+/* "Card saved" toast — one link per new card */
+.iris-notice-link {
+  display: block;
+  margin-top: 4px;
+  color: var(--link-color);
+  text-decoration: underline;
   cursor: pointer;
+}
+
+.iris-notice-more {
+  margin-top: 4px;
+  color: var(--text-muted);
 }
 
 .iris-badge {
@@ -1013,57 +1022,6 @@ textarea.iris-manual-card-input {
   background: transparent;
 }
 
-/* Card library — the "Facts" Bases view. Everything around it (toolbar,
-   search, filters) is Bases' own. */
-.iris-facts-view {
-  padding: 0 var(--size-4-4) var(--size-4-4);
-  overflow-y: auto;
-}
-
-.iris-facts-group {
-  font-size: var(--font-ui-small);
-  font-weight: var(--font-semibold);
-  color: var(--text-muted);
-  padding: var(--size-4-3) 0 var(--size-4-1);
-}
-
-.iris-facts-row {
-  padding: var(--size-4-2) var(--size-4-3);
-  border-radius: var(--radius-s);
-  cursor: var(--cursor);
-}
-
-.iris-facts-row:hover {
-  background: var(--background-modifier-hover);
-}
-
-.iris-facts-body {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow-wrap: anywhere;
-}
-
-.iris-facts-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--size-2-2) var(--size-4-3);
-  margin-top: var(--size-2-1);
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.iris-facts-meta:empty {
-  display: none;
-}
-
-.iris-facts-empty {
-  text-align: center;
-  color: var(--text-muted);
-  padding: 40px 0;
-}
-
 /* Homepage widget — reuses .iris-card and friends from the full review view. */
 .iris-widget {
   display: flex;
@@ -1455,14 +1413,6 @@ button.iris-author-option-mark.iris-author-option-correct {
   gap: 8px;
   margin-bottom: 8px;
   align-items: flex-start;
-}
-
-.iris-author-pair-name {
-  flex: 0 0 34%;
-}
-
-.iris-author-pair-content {
-  flex: 1;
 }
 
 .iris-author-step {

@@ -1,7 +1,7 @@
 import { App, Modal, Notice, TFile } from "obsidian";
 import type IrisCardsPlugin from "../main";
 import { type ExerciseType, type QAVariant } from "../types/exercises";
-import { encodePairs, decodePairs, type PairsField } from "../generators/pairs";
+import { encodePairs, decodePairs } from "../generators/pairs";
 import { encodeMultiStep, decodeMultiStep, type MultiStep } from "../generators/multi-step";
 import { encodeTFPair, decodeTFPair } from "../generators/true-false";
 import { encodeMC, decodeMC } from "../generators/multiple-choice";
@@ -31,7 +31,7 @@ import { ImageSuggestModal } from "../widgets/image-suggest";
  *     (Property series items) keep Enter as newline.
  *   - Switching type never loses work — each type's fields persist behind the
  *     picker for the life of the form.
- *   - Textareas grow with their content; list-like types (Pairs, Multi-step)
+ *   - Textareas grow with their content; list-like types (Match, Multi-step)
  *     grow a fresh row as soon as the last one is touched — no add buttons.
  *   - Pasting an image into any field saves it to the vault's attachment
  *     folder and inserts the embed link.
@@ -112,7 +112,7 @@ export function editableTypeId(variant: QAVariant): string | null {
     switch (variant.exerciseType) {
       case "Q&A": return "qa";
       case "Cloze": return "cloze";
-      case "Pairs": decodePairs(variant.question); return "pairs";
+      case "Pairs": return decodePairs(variant.question).fields.length === 2 ? "pairs" : null;
       case "True/False": return decodeTFPair(variant.question) ? "tf" : null;
       case "Multiple Choice": return decodeMC(variant.question, variant.answer).options.length >= 2 ? "mc" : null;
       case "Rank": decodeRank(variant.question, variant.answer); return "order";
@@ -290,51 +290,26 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     id: "pairs",
     label: "Double-sided",
     build(fields, initial) {
-      const rows: { name: HTMLInputElement; content: HTMLTextAreaElement }[] = [];
-      fields.createDiv({
-        text: "You'll be shown one side and asked for another. Fill in a third row (or more) for extra sides. Naming sides — e.g. \"structure\" / \"name\" — makes the question say what it's asking for. Images can be pasted straight in.",
-        cls: "iris-author-hint",
-      });
-      const rowsEl = fields.createDiv();
-      const wireAutoAdd = autoAddRows(
-        () => rows.map(r => [r.name, r.content]),
-        () => addRow(),
-      );
-      const addRow = () => {
-        const row = rowsEl.createDiv({ cls: "iris-author-pair-row" });
-        const name = row.createEl("input", { type: "text", cls: "iris-author-input iris-author-pair-name" });
-        name.placeholder = "Name (optional)";
-        const content = row.createEl("textarea", { cls: "iris-author-input iris-author-pair-content" });
-        content.rows = 1;
-        content.placeholder = rows.length === 0 ? "Front" : rows.length === 1 ? "Back" : "Another side";
-        rows.push({ name, content });
-        wireAutoAdd([name, content]);
-      };
+      // Just a front and a back. Side names from older or generated cards
+      // aren't shown, but are kept on save so their review prompts don't change.
+      const front = addTextArea(fields, "Front");
+      const back = addTextArea(fields, "Back");
+      let names = ["", ""];
       if (initial) {
         try {
-          for (const f of decodePairs(initial.question).fields) {
-            addRow();
-            const r = rows[rows.length - 1];
-            r.name.value = f.name;
-            r.content.value = f.content;
-          }
-        } catch { /* vetted by editableTypeId; fall through to empty rows */ }
+          const [f, b] = decodePairs(initial.question).fields;
+          front.value = f.content;
+          back.value = b.content;
+          names = [f.name, b.name];
+        } catch { /* vetted by editableTypeId; fall through to empty fields */ }
       }
-      while (rows.length < 2) addRow();
-      if (initial && rows[rows.length - 1].content.value) addRow(); // trailing empty row
       return () => {
-        const complete: PairsField[] = [];
-        for (const r of rows) {
-          const name = r.name.value.trim();
-          const content = r.content.value.trim();
-          if (content) complete.push({ name, content });
-          else if (name) return `The "${name}" side has no content.`;
-        }
-        if (complete.length < 2) return "A double-sided card needs at least two sides.";
-        const e = encodePairs(complete);
+        const sides = [front.value.trim(), back.value.trim()];
+        if (!sides[0] || !sides[1]) return "Both sides need some text.";
+        const e = encodePairs(sides.map((content, i) => ({ name: names[i], content })));
         return {
           variant: mkVariant("Pairs", e.question, e.answer),
-          factText: complete.map(f => f.name ? `${f.name}: ${f.content}` : f.content).join("\n"),
+          factText: sides.join("\n"),
         };
       };
     },

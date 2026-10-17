@@ -1,4 +1,4 @@
-import { Editor, MarkdownView, MarkdownFileInfo, Modal, TFile, Notice } from "obsidian";
+import { Editor, Keymap, MarkdownView, MarkdownFileInfo, Modal, TFile, Notice } from "obsidian";
 import { stripMarkdown } from "./utils";
 import type IrisCardsPlugin from "../main";
 import { ImageOcclusionEditor } from "../widgets/image-occlusion-editor";
@@ -8,14 +8,32 @@ import { buildQABlock } from "../types/qa-block";
 import { buildCardAuthorForm, type AuthoredCard } from "../review/card-author";
 import { getGroupOrders } from "../scheduler";
 
-// Toast that, when clicked, opens the card it announces.
-function notifyCardSaved(plugin: IrisCardsPlugin, file: TFile, message = "You'll be quizzed on this."): void {
-  const notice = new Notice(message);
-  notice.noticeEl.addClass("iris-notice-clickable");
-  notice.noticeEl.addEventListener("click", () => {
-    void plugin.app.workspace.getLeaf(false).openFile(file);
-    notice.hide();
-  });
+/** How many card links a toast lists before summarising the rest. */
+const NOTICE_MAX_LINKS = 5;
+
+/**
+ * Toast announcing new cards, with a link to each card file. Card files are
+ * named by timestamp, so each link reads as the start of the card's own text.
+ */
+function notifyCardsSaved(plugin: IrisCardsPlugin, message: string, cards: { file: TFile; text: string }[]): void {
+  const notice = new Notice(message, 8000);
+  for (const card of cards.slice(0, NOTICE_MAX_LINKS)) {
+    const label = card.text.split("\n").map(l => l.trim()).find(Boolean) ?? card.file.basename;
+    const link = notice.messageEl.createEl("a", {
+      cls: "iris-notice-link",
+      text: label.length > 60 ? label.slice(0, 59).trimEnd() + "…" : label,
+      href: card.file.path,
+    });
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void plugin.app.workspace.getLeaf(Keymap.isModEvent(e)).openFile(card.file);
+      notice.hide();
+    });
+  }
+  if (cards.length > NOTICE_MAX_LINKS) {
+    notice.messageEl.createDiv({ cls: "iris-notice-more", text: `and ${cards.length - NOTICE_MAX_LINKS} more` });
+  }
 }
 
 function buildContextLine(plugin: IrisCardsPlugin, sourceFile: TFile, editor: Editor): string {
@@ -207,7 +225,7 @@ export async function makeFlashcard(
       plugin.app.metadataCache.offref(ref);
       plugin.updateBadge();
     });
-    notifyCardSaved(plugin, newFile);
+    notifyCardsSaved(plugin, "Card saved.", [{ file: newFile, text: shortcut.question }]);
     return;
   }
 
@@ -222,11 +240,13 @@ export async function makeFlashcard(
     const priorOrders = groupName ? getGroupOrders(plugin.app, cardsFolder) : null;
     const startOrder = priorOrders?.get(groupName!) ?? 0;
     let order = startOrder;
+    const saved: { file: TFile; text: string }[] = [];
     for (const fact of facts) {
       order++;
       const factBody = contextLine ? `${contextLine}\n\n${fact}` : fact;
       const group = groupName ? { name: groupName, order, waiting: order > 1 } : undefined;
       const factFile = await plugin.cardStore.createCard(cardsFolder, factBody, source, group);
+      saved.push({ file: factFile, text: fact });
       // Waiting facts get their variants generated when they're started
       // (pregenerateAll covers newly due cards) — no API spend up front.
       const reviewableNow = !group || !group.waiting;
@@ -236,9 +256,9 @@ export async function makeFlashcard(
       plugin.app.metadataCache.offref(ref);
       plugin.updateBadge();
     });
-    new Notice(groupName
-      ? `You'll be quizzed on these ${facts.length} facts, one at a time — "${groupName}".`
-      : `You'll be quizzed on these ${facts.length} facts.`);
+    notifyCardsSaved(plugin, groupName
+      ? `${facts.length} cards saved to "${groupName}", introduced one at a time.`
+      : `${facts.length} cards saved.`, saved);
     return;
   }
 
@@ -250,7 +270,7 @@ export async function makeFlashcard(
     plugin.app.metadataCache.offref(ref);
     plugin.updateBadge();
   });
-  notifyCardSaved(plugin, newFile);
+  notifyCardsSaved(plugin, "Card saved.", [{ file: newFile, text: selection }]);
 }
 
 // ─── Image Occlusion ────────────────────────────────────────────────
@@ -288,7 +308,7 @@ async function openOcclusionEditorForImage(
       plugin.app.metadataCache.offref(ref);
       plugin.updateBadge();
     });
-    new Notice(`Image occlusion card created (${regions.length} regions).`);
+    notifyCardsSaved(plugin, `Image occlusion card saved (${regions.length} regions).`, [{ file: newFile, text: imageFile.basename }]);
   };
 
   new ImageOcclusionEditor(plugin.app, plugin, imageFile, [], onSave).open();
@@ -356,7 +376,7 @@ async function createManualCard(
     plugin.app.metadataCache.offref(ref);
     plugin.updateBadge();
   });
-  new Notice("Card created.");
+  notifyCardsSaved(plugin, "Card saved.", [{ file: newFile, text: authored.factText }]);
 }
 
 class ManualCardModal extends Modal {
