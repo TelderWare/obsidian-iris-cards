@@ -1,6 +1,7 @@
 import { TFile } from "obsidian";
 import { type QAVariant, type ExerciseType } from "../types/exercises";
 import { parseQABlock } from "../types/qa-block";
+import { factImagePath } from "../types/image-occlusion";
 import { setRelayPriority } from "../api/client";
 import { aiEnabled } from "../ai";
 import { standardizeQuestion, reframeQuestion } from "../api/qc";
@@ -194,6 +195,14 @@ export class PregenManager {
           const content = await this.plugin.app.vault.read(card);
           const parsed = parseQABlock(content);
           existingVariants = [...parsed.variants];
+
+          // An image with no text gives the classifier and generators nothing
+          // to work from: its cards are only ever written by hand.
+          if (factImagePath(parsed.body)) {
+            await this.plugin.cardStore.updateSuspendedFlag(card, existingVariants);
+            resolve(existingVariants);
+            return;
+          }
 
           let eligible = parsed.eligibleTypes;
           let variants = [...existingVariants];

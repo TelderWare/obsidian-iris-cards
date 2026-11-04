@@ -4,8 +4,9 @@ import { activeModuleFilter, getDueCards, getAllCards, getModules, getParentNote
 import { playFeedbackSound } from "./feedback-sound";
 import { openCardLibrary } from "./card-library";
 import { EXERCISE_TYPES, exerciseTypeLabel, type QAVariant } from "../types/exercises";
-import { renderCurrentCard, renderVariantInto, getParsedCached, invalidateParsedCache, type AnswerFn } from "./renderers";
+import { renderCurrentCard, getParsedCached, invalidateParsedCache, releaseCardKeys } from "./renderers";
 import { buildCardAuthorForm, variantFactText } from "./card-author";
+import { factImagePath } from "../types/image-occlusion";
 import { aiEnabled, llmMarkingEnabled } from "../ai";
 
 /**
@@ -82,6 +83,21 @@ export class ReviewView extends ItemView {
    * variant.
    */
   private committedVariants = new Map<string, QAVariant>();
+  /** Cards behind the current one, most recent last (the back button). */
+  private backStack: ReviewItem[] = [];
+  /** Cards stepped back past, nearest last (the forward button). */
+  private forwardStack: ReviewItem[] = [];
+  /** Cards with a review recorded this session. Stepping back to one doesn't
+   * record a second review of it. */
+  private reviewedKeys = new Set<string>();
+  /** The already-reviewed card currently being revisited, if any. */
+  private revisitKey: string | null = null;
+  /** The question last shown per card, so stepping back finds the same one. */
+  private lastShownVariants = new Map<string, QAVariant>();
+  /** True while a rating or a step is moving the queue. */
+  private queueBusy = false;
+  private backBtn: HTMLButtonElement | null = null;
+  private forwardBtn: HTMLButtonElement | null = null;
   scrollBody: HTMLDivElement | null = null;
   layoutReady = false;
   private audioCtx: AudioContext | null = null;
@@ -199,6 +215,73 @@ export class ReviewView extends ItemView {
   /** Record that a committed variant was actually presented to the user. */
   markCommitSeen(file: TFile, variant: QAVariant): void {
     this.shownVariants.add(file.path + "\0" + variant.question);
+    this.lastShownVariants.set(file.path, variant);
+  }
+
+  private async goBack(): Promise<void> {
+    if (this.queueBusy) return;
+    const target = this.popLiveItem(this.backStack);
+    if (!target) return;
+    if (this.currentItem) this.forwardStack.push(this.currentItem);
+    await this.stepTo(target);
+  }
+
+  /** Forward retraces steps taken back; past those, it skips to the next card
+   * and leaves this one for later. */
+  private async goForward(): Promise<void> {
+    if (this.queueBusy || !this.canGoForward()) return;
+    const target = this.popLiveItem(this.forwardStack);
+
+    const leaving = this.currentItem!;
+    const key = itemKey(leaving);
+    this.backStack.push(leaving);
+    this.dueCards = this.dueCards.filter(i => itemKey(i) !== key);
+    // A reviewed card is finished with, unless infinite mode is cycling the queue.
+    if (this.infiniteMode || !this.reviewedKeys.has(key)) this.dueCards.push(leaving);
+    await this.stepTo(target);
+  }
+
+  /** Show `target` next, or the head of the queue when there's no target. */
+  private async stepTo(target: ReviewItem | null): Promise<void> {
+    this.queueBusy = true;
+    try {
+      releaseCardKeys(this);
+      this.revisitKey = null;
+      if (target) {
+        const key = itemKey(target);
+        this.dueCards = [target, ...this.dueCards.filter(i => itemKey(i) !== key)];
+        this.committedNextKey = key;
+        const shown = this.lastShownVariants.get(target.file.path);
+        if (shown) this.committedVariants.set(target.file.path, shown);
+        if (this.reviewedKeys.has(key)) this.revisitKey = key;
+      }
+      await this.showNextCard();
+    } finally {
+      this.queueBusy = false;
+      this.updateNavButtons();
+    }
+  }
+
+  /** Pop the nearest item whose card still exists. */
+  private popLiveItem(stack: ReviewItem[]): ReviewItem | null {
+    while (stack.length > 0) {
+      const item = stack.pop()!;
+      if (this.app.vault.getAbstractFileByPath(item.file.path)) return item;
+    }
+    return null;
+  }
+
+  private updateNavButtons(): void {
+    if (this.backBtn) this.backBtn.disabled = this.backStack.length === 0;
+    if (this.forwardBtn) this.forwardBtn.disabled = !this.canGoForward();
+  }
+
+  /** There's somewhere to go: a step to retrace, another card, or — from a
+   * revisit of the last card — back out to the end of the queue. */
+  private canGoForward(): boolean {
+    if (!this.currentItem) return false;
+    return this.forwardStack.length > 0 || this.dueCards.length > 1
+      || (!this.infiniteMode && this.reviewedKeys.has(itemKey(this.currentItem)));
   }
 
   private pickFreshVariant(file: TFile, active: QAVariant[]): QAVariant {
@@ -260,6 +343,12 @@ export class ReviewView extends ItemView {
     this.sessionShowCount.clear();
     this.committedVariants.clear();
     this.committedNextKey = null;
+    this.currentItem = null;
+    this.backStack = [];
+    this.forwardStack = [];
+    this.reviewedKeys.clear();
+    this.revisitKey = null;
+    this.lastShownVariants.clear();
     if (this.dueCards.length === 0) {
       this.renderDoneCard();
       return;
@@ -361,7 +450,16 @@ export class ReviewView extends ItemView {
 
     const headerCenter = header.createDiv({ cls: "iris-header-center" });
 
-    const makeToggle = (icon: string, title: string, active: boolean, onChange: (v: boolean) => void) => {
+    const makeNavButton = (icon: string, label: string, onClick: () => Promise<void>) => {
+      const btn = headerCenter.createEl("button", { cls: "iris-toggle clickable-icon", attr: { "aria-label": label } });
+      setIcon(btn, icon);
+      btn.addEventListener("click", () => void onClick());
+      return btn;
+    };
+
+    this.backBtn = makeNavButton("chevron-left", "Previous card", () => this.goBack());
+
+    const makeToggle =(icon: string, title: string, active: boolean, onChange: (v: boolean) => void) => {
       const btn = headerCenter.createEl("button", { cls: "iris-toggle clickable-icon", attr: { "aria-label": title } });
       setIcon(btn, icon);
       btn.toggleClass("is-active", active);
@@ -406,6 +504,8 @@ export class ReviewView extends ItemView {
       this.layoutReady = false;
       await this.loadDueCards();
     });
+
+    this.forwardBtn = makeNavButton("chevron-right", "Next card", () => this.goForward());
 
     // Module filter — icon button with floating panel attached to document.body (JS-positioned to sidestep parent CSS issues)
     const modules = getModules(this.app, this.plugin.settings.cardsFolder);
@@ -593,8 +693,10 @@ export class ReviewView extends ItemView {
 
   renderDoneCard(): void {
     this.writingQuestions = false;
+    this.currentItem = null;
     this.clearDoneCheck();
     this.ensureLayout();
+    this.updateNavButtons();
     const body = this.scrollBody!;
     body.empty();
 
@@ -733,7 +835,6 @@ export class ReviewView extends ItemView {
 
   async showNextCard(): Promise<void> {
     this.clearDoneCheck();
-    this.peekedAnswer = false;
 
     // Skip deleted cards
     while (this.dueCards.length > 0 && !this.app.vault.getAbstractFileByPath(this.dueCards[0].file.path)) {
@@ -764,8 +865,12 @@ export class ReviewView extends ItemView {
 
     const item = this.dueCards[0];
     this.currentItem = item;
+    // A card that's already been reviewed is answered as if peeked: Next, with
+    // nothing recorded, so stepping back can't count one review twice.
+    this.peekedAnswer = itemKey(item) === this.revisitKey;
     this.sessionShowCount.set(itemKey(item), (this.sessionShowCount.get(itemKey(item)) ?? 0) + 1);
     this.ensureLayout();
+    this.updateNavButtons();
 
     const ai = aiEnabled(this.plugin);
     const apiKey = this.plugin.settings.anthropicApiKey;
@@ -831,6 +936,18 @@ export class ReviewView extends ItemView {
     const active = variants.filter(v => !v.suspended && !v.rephrase);
     const variant = this.commitVariantFor(cardFile, active);
     if (!variant) {
+      // The AI can't write a card for an image, so that's left to you, the same
+      // as any fact with AI off.
+      if (active.length === 0) {
+        let parsedBody = "";
+        try {
+          parsedBody = (await getParsedCached(this.app, cardFile)).body;
+        } catch { /* unreadable card — handled as skipped below */ }
+        if (factImagePath(parsedBody)) {
+          await this.renderAuthorCard(cardFile);
+          return;
+        }
+      }
       // No usable variants (generation failed with no fallback, or all suspended) — skip this card
       this.dueCards.shift();
       this.clearCommit(cardFile.path);
@@ -856,36 +973,25 @@ export class ReviewView extends ItemView {
     const card = body.createDiv({ cls: "iris-card iris-author-card" });
     this.currentCardEl = card;
 
-    // Laid out like the Create card / Edit card modals, which host the same
-    // form: a title saying what to do, then the content, then the form with
-    // just the type picker and Save in its footer. Later/trash are about this
-    // card in the queue, not the question being written, so they sit by the
-    // title — where a modal keeps its close button — not in the Save row.
-    const titleRow = card.createDiv({ cls: "iris-author-titlerow" });
-    const titleEl = titleRow.createDiv({ cls: "iris-author-title" });
-    const headerBtns = titleRow.createDiv({ cls: "iris-author-header-btns" });
-    const laterBtn = headerBtns.createEl("button", { cls: "iris-author-later", text: "Later" });
+    const titleEl = card.createDiv({ cls: "iris-author-title" });
 
-    // A junk capture shouldn't cycle forever — trash it here. Two clicks so a
+    // A junk capture shouldn't cycle forever — delete it here. Two clicks so a
     // stray tap can't delete a fact.
-    const trashBtn = headerBtns.createEl("button", {
-      cls: "iris-author-later iris-author-trash",
-      attr: { "aria-label": "Move fact to trash (click again to confirm)" },
-    });
-    setIcon(trashBtn, "trash-2");
-    let trashConfirming = false;
-    let trashResetTimer = 0;
-    trashBtn.addEventListener("click", async () => {
-      if (!trashConfirming) {
-        trashConfirming = true;
-        trashBtn.addClass("iris-author-trash-confirm");
-        trashResetTimer = window.setTimeout(() => {
-          trashConfirming = false;
-          trashBtn.removeClass("iris-author-trash-confirm");
+    let deleteConfirming = false;
+    let deleteResetTimer = 0;
+    const deleteFact = async (btn: HTMLButtonElement) => {
+      if (!deleteConfirming) {
+        deleteConfirming = true;
+        btn.setText("Confirm delete");
+        btn.addClass("iris-author-confirm");
+        deleteResetTimer = window.setTimeout(() => {
+          deleteConfirming = false;
+          btn.setText("Delete");
+          btn.removeClass("iris-author-confirm");
         }, 3000);
         return;
       }
-      window.clearTimeout(trashResetTimer);
+      window.clearTimeout(deleteResetTimer);
       await this.app.fileManager.trashFile(cardFile);
       new Notice("Fact moved to trash.");
       this.plugin.qaCache.delete(cardFile.path);
@@ -894,7 +1000,7 @@ export class ReviewView extends ItemView {
       card.remove();
       this.plugin.updateBadge();
       await this.showNextCard();
-    });
+    };
 
     let factBody = "";
     let variants: QAVariant[] = [];
@@ -913,6 +1019,9 @@ export class ReviewView extends ItemView {
     const contextLines = factBody.split("\n").filter(isContext);
     const factRest = factBody.split("\n").filter(l => !isContext(l)).join("\n").trim();
     const seedText = factSentence(factRest);
+    // A fact that's only an image starts as an occlusion card on that image.
+    const imagePath = factImagePath(factRest);
+    const seedImage = (imagePath && this.app.metadataCache.getFirstLinkpathDest(imagePath, cardFile.path)) || undefined;
     // With no fact text, an existing question is the only record of what the
     // card is about — show one so there's something to write from. The
     // flagged one first: it's the question being replaced.
@@ -945,18 +1054,26 @@ export class ReviewView extends ItemView {
     buildCardAuthorForm(card, {
       app: this.app,
       plugin: this.plugin,
-      initialTypeId: this.plugin.settings.authorLastType,
+      initialTypeId: seedImage ? "occlusion" : this.plugin.settings.authorLastType,
       onTypeChange: (id) => {
-        void this.plugin.updateSetting("authorLastType", id);
+        // Opening on an image's occlusion form isn't a choice worth remembering.
+        if (!(seedImage && id === "occlusion")) void this.plugin.updateSetting("authorLastType", id);
         // Cloze shows the fact's own sentence as its editable surface, so the
         // rendered fact above it would be the same sentence twice. Only hide it
         // when it really is just that sentence — a fact that also carries an
         // image keeps its block, since the image isn't in the cloze surface.
-        factEl?.toggleClass("iris-hidden", id === "cloze" && factRest === seedText);
+        // Occlusion likewise shows the fact's image itself.
+        factEl?.toggleClass("iris-hidden",
+          (id === "cloze" && factRest === seedText) || (id === "occlusion" && !!seedImage));
       },
       // The fact's own sentence, minus the "(Context: …)" breadcrumb, so a
       // Cloze starts as the fact itself rather than an empty box.
       seedText,
+      seedImage,
+      extraActions: [
+        { label: "Later", onClick: () => this.goForward() },
+        { label: "Delete", onClick: deleteFact },
+      ],
       onSave: async (authored) => {
         await this.plugin.cardStore.updateVariants(cardFile, (vs) => { vs.push(authored.variant); });
         invalidateParsedCache(cardFile.path);
@@ -967,15 +1084,9 @@ export class ReviewView extends ItemView {
       },
     });
 
-    laterBtn.addEventListener("click", async () => {
-      const c = this.dueCards.shift();
-      if (c) this.dueCards.push(c);
-      this.clearCommit(cardFile.path);
-      card.remove();
-      await this.showNextCard();
-    });
-
-    this.scrollToCenter(card);
+    // The title sits at the top of the pane, so there's nothing to centre.
+    this.scrollAnimId++;
+    body.scrollTop = 0;
   }
 
   private getOrCreateAudioCtx(): AudioContext {
@@ -1022,6 +1133,10 @@ export class ReviewView extends ItemView {
   /** Shared post-rating queue advance: rotate (infinite) or drop the head,
    * optionally bury the rated fact's siblings, then show what's next. */
   private async advanceAfterRate(buryFor?: TFile): Promise<void> {
+    if (this.dueCards[0]) this.backStack.push(this.dueCards[0]);
+    this.forwardStack = [];
+    this.revisitKey = null;
+
     if (this.infiniteMode) {
       const item = this.dueCards.shift();
       if (item) this.dueCards.push(item);
@@ -1040,6 +1155,18 @@ export class ReviewView extends ItemView {
   }
 
   async rateCard(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number, gapTerm?: string, grade?: number): Promise<void> {
+    // Marking can finish after the card has been stepped away from.
+    if (this.queueBusy || this.currentItem?.file.path !== file.path) return;
+    this.queueBusy = true;
+    try {
+      await this.recordAndAdvance(file, correct, userAnswer, questionShown, elapsedMs, gapTerm, grade);
+    } finally {
+      this.queueBusy = false;
+      this.updateNavButtons();
+    }
+  }
+
+  private async recordAndAdvance(file: TFile, correct: boolean, userAnswer?: string, questionShown?: string, elapsedMs?: number, gapTerm?: string, grade?: number): Promise<void> {
     this.freezeCurrentCard();
 
     this.plugin.qaCache.delete(file.path);
@@ -1052,6 +1179,7 @@ export class ReviewView extends ItemView {
     if (!this.peekedAnswer) {
       try {
         await this.plugin.cardStore.recordReview(file, correct, questionShown, userAnswer, elapsedMs, gapTerm, grade, this.plugin.settings.cardsFolder, this.plugin.settings.desiredRetention, this.plugin.settings.scheduler);
+        this.reviewedKeys.add(file.path);
         for (const other of this.plugin.reviewViews) {
           if (other !== this) other.handleExternalRate(file);
         }

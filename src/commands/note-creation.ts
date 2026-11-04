@@ -4,18 +4,18 @@ import type IrisCardsPlugin from "../main";
 import { ImageOcclusionEditor } from "../widgets/image-occlusion-editor";
 import { ImageSuggestModal, IMAGE_EXTS } from "../widgets/image-suggest";
 import { encodeImageOcclusion, extractImagePath, type OcclusionRegion } from "../types/image-occlusion";
-import { buildQABlock } from "../types/qa-block";
+import { buildQABlock, parseQABlock } from "../types/qa-block";
 import { buildCardAuthorForm, type AuthoredCard } from "../review/card-author";
-import { getGroupOrders } from "../scheduler";
+import { getGroupOrders, getParentNoteName } from "../scheduler";
 
 /** How many card links a toast lists before summarising the rest. */
 const NOTICE_MAX_LINKS = 5;
 
 /**
- * Toast announcing new cards, with a link to each card file. Card files are
+ * Toast about captured cards, with a link to each card file. Card files are
  * named by timestamp, so each link reads as the start of the card's own text.
  */
-function notifyCardsSaved(plugin: IrisCardsPlugin, message: string, cards: { file: TFile; text: string }[]): void {
+function notifyCards(plugin: IrisCardsPlugin, message: string, cards: { file: TFile; text: string }[]): void {
   const notice = new Notice(message, 8000);
   for (const card of cards.slice(0, NOTICE_MAX_LINKS)) {
     const label = card.text.split("\n").map(l => l.trim()).find(Boolean) ?? card.file.basename;
@@ -87,7 +87,7 @@ class GroupNameModal extends Modal {
     this.setTitle("Group these facts?");
     contentEl.createEl("p", {
       cls: "iris-group-name-desc",
-      text: `${this.factCount} facts. Grouped facts are introduced one at a time — you start each next one when you're ready.`,
+      text: `${this.factCount} ${this.factCount === 1 ? "fact" : "facts"}. Grouped facts are introduced one at a time — you start each next one when you're ready.`,
     });
 
     const input = contentEl.createEl("input", {
@@ -163,11 +163,68 @@ function parseQAShortcut(text: string): { question: string; answer: string } | n
   return { question, answer };
 }
 
-export async function makeFlashcard(
+/** What makes two captures the same fact: their text, ignoring the context
+ * breadcrumb, letter case and spacing. */
+function factKey(body: string): string {
+  return body
+    .split("\n")
+    .filter(l => !/^\s*\(Context:/i.test(l))
+    .join(" ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/**
+ * The cards already captured from `sourceFile`, by fact. Limited to that note:
+ * the same words in another note can mean something else there, whereas the
+ * same words twice from one note are a repeated capture.
+ *
+ * A card whose metadata hasn't been indexed yet is still read, so one captured
+ * moments ago counts.
+ */
+async function capturedFacts(plugin: IrisCardsPlugin, cardsFolder: string, sourceFile: TFile | null): Promise<Map<string, TFile>> {
+  const facts = new Map<string, TFile>();
+  const prefix = cardsFolder + "/";
+  const reads = plugin.app.vault.getMarkdownFiles()
+    .filter(f => f.path.startsWith(prefix))
+    .filter(f => {
+      const fm = plugin.app.metadataCache.getFileCache(f)?.frontmatter;
+      return !fm || getParentNoteName(fm) === sourceFile?.basename;
+    })
+    .map(async (f) => {
+      try {
+        const key = factKey(parseQABlock(await plugin.app.vault.cachedRead(f)).body);
+        if (key) facts.set(key, f);
+      } catch { /* an unreadable card can't be matched */ }
+    });
+  await Promise.all(reads);
+  return facts;
+}
+
+/** Each capture finishes before the next starts, so a repeated press sees the
+ * card the press before it made. */
+let captureQueue: Promise<void> = Promise.resolve();
+
+export function makeFlashcard(
   plugin: IrisCardsPlugin,
   editor: Editor,
   ctx: MarkdownView | MarkdownFileInfo,
 ): Promise<void> {
+  // The editor is read now: by the queue's turn the selection may have moved.
+  const capture = prepareCapture(plugin, editor, ctx);
+  const run = captureQueue.then(capture);
+  captureQueue = run.catch(() => {});
+  return run;
+}
+
+const ALREADY_CAPTURED = "Already a card, so not saved again.";
+
+function prepareCapture(
+  plugin: IrisCardsPlugin,
+  editor: Editor,
+  ctx: MarkdownView | MarkdownFileInfo,
+): () => Promise<void> {
   const sourceFile = ctx.file;
   const srcFm = sourceFile ? plugin.app.metadataCache.getFileCache(sourceFile)?.frontmatter : undefined;
   const source = sourceFile ? {
@@ -176,13 +233,29 @@ export async function makeFlashcard(
     date: srcFm?.["date"] ?? undefined,
   } : undefined;
 
-  // Image embed selected (or sitting under the cursor) → open the occlusion
-  // editor instead of making a text card. Checked before the empty-selection
-  // guard because clicking an image in Live Preview leaves getSelection() empty.
+  // Image embed selected (or sitting under the cursor) → capture it as a fact,
+  // like any other selection; its card gets written when the fact comes due.
+  // Checked before the empty-selection guard because clicking an image in Live
+  // Preview leaves getSelection() empty.
+  const cardsFolder = plugin.settings.cardsFolder.trim() || "Iris Cards";
+  const contextLine = sourceFile ? buildContextLine(plugin, sourceFile, editor) : "";
+
   const imageFile = findImageInSelection(plugin, editor, sourceFile);
   if (imageFile) {
-    await openOcclusionEditorForImage(plugin, imageFile, source);
-    return;
+    return async () => {
+      const embed = `![[${imageFile.path}]]`;
+      const existing = (await capturedFacts(plugin, cardsFolder, sourceFile)).get(factKey(embed));
+      if (existing) {
+        notifyCards(plugin, ALREADY_CAPTURED, [{ file: existing, text: imageFile.basename }]);
+        return;
+      }
+      const newFile = await plugin.cardStore.createCard(cardsFolder, contextLine ? `${contextLine}\n\n${embed}` : embed, source);
+      const ref = plugin.app.metadataCache.on("resolved", () => {
+        plugin.app.metadataCache.offref(ref);
+        plugin.updateBadge();
+      });
+      notifyCards(plugin, "Card saved.", [{ file: newFile, text: imageFile.basename }]);
+    };
   }
 
   // Nothing selected → make a flashcard from scratch: open the authoring
@@ -190,16 +263,30 @@ export async function makeFlashcard(
   // parent-note/module wiring is identical.)
   const rawSelection = editor.getSelection().trim();
   if (!rawSelection) {
-    createCardManually(plugin);
-    return;
+    return async () => createCardManually(plugin);
   }
 
   const selection = stripMarkdown(rawSelection);
-  const cardsFolder = plugin.settings.cardsFolder.trim() || "Iris Cards";
+  return () => captureSelection(plugin, selection, contextLine, cardsFolder, sourceFile, source);
+}
 
+async function captureSelection(
+  plugin: IrisCardsPlugin,
+  selection: string,
+  contextLine: string,
+  cardsFolder: string,
+  sourceFile: TFile | null,
+  source: { file: TFile; module?: string; date?: string } | undefined,
+): Promise<void> {
   const apiKey = plugin.settings.anthropicApiKey;
-  const contextLine = sourceFile ? buildContextLine(plugin, sourceFile, editor) : "";
   const cardBody = contextLine ? `${contextLine}\n\n${selection}` : selection;
+  const captured = await capturedFacts(plugin, cardsFolder, sourceFile);
+
+  const existing = captured.get(factKey(selection));
+  if (existing) {
+    notifyCards(plugin, ALREADY_CAPTURED, [{ file: existing, text: selection }]);
+    return;
+  }
 
   // Fast path: selection is already a Q:/A: pair — store it verbatim, no LLM.
   // Eligible: Q&A is set so pregeneration sees the single Q&A variant as full
@@ -225,7 +312,7 @@ export async function makeFlashcard(
       plugin.app.metadataCache.offref(ref);
       plugin.updateBadge();
     });
-    notifyCardsSaved(plugin, "Card saved.", [{ file: newFile, text: shortcut.question }]);
+    notifyCards(plugin, "Card saved.", [{ file: newFile, text: shortcut.question }]);
     return;
   }
 
@@ -234,8 +321,24 @@ export async function makeFlashcard(
   // starts reviewable; the rest wait to be started one at a time, so
   // confusable facts aren't learned simultaneously. Naming an existing group
   // appends to it (new facts queue behind its current members).
-  const facts = parseBulkFacts(selection);
-  if (facts) {
+  const lines = parseBulkFacts(selection);
+  if (lines) {
+    // Only the new lines become cards, so re-capturing a list that has grown
+    // adds just what's new.
+    const seen = new Set<string>();
+    const facts: string[] = [];
+    const repeats: { file: TFile; text: string }[] = [];
+    for (const line of lines) {
+      const key = factKey(line);
+      const found = captured.get(key);
+      if (found) repeats.push({ file: found, text: line });
+      else if (!seen.has(key)) facts.push(line);
+      seen.add(key);
+    }
+    if (facts.length === 0) {
+      notifyCards(plugin, "All of these are already cards, so none were saved again.", repeats);
+      return;
+    }
     const groupName = await askGroupName(plugin, facts.length);
     const priorOrders = groupName ? getGroupOrders(plugin.app, cardsFolder) : null;
     const startOrder = priorOrders?.get(groupName!) ?? 0;
@@ -256,9 +359,11 @@ export async function makeFlashcard(
       plugin.app.metadataCache.offref(ref);
       plugin.updateBadge();
     });
-    notifyCardsSaved(plugin, groupName
-      ? `${facts.length} cards saved to "${groupName}", introduced one at a time.`
-      : `${facts.length} cards saved.`, saved);
+    const count = `${facts.length} card${facts.length === 1 ? "" : "s"}`;
+    const skipped = repeats.length > 0 ? ` ${repeats.length} already existed.` : "";
+    notifyCards(plugin, (groupName
+      ? `${count} saved to "${groupName}", introduced one at a time.`
+      : `${count} saved.`) + skipped, saved);
     return;
   }
 
@@ -270,7 +375,7 @@ export async function makeFlashcard(
     plugin.app.metadataCache.offref(ref);
     plugin.updateBadge();
   });
-  notifyCardsSaved(plugin, "Card saved.", [{ file: newFile, text: selection }]);
+  notifyCards(plugin, "Card saved.", [{ file: newFile, text: selection }]);
 }
 
 // ─── Image Occlusion ────────────────────────────────────────────────
@@ -308,7 +413,7 @@ async function openOcclusionEditorForImage(
       plugin.app.metadataCache.offref(ref);
       plugin.updateBadge();
     });
-    notifyCardsSaved(plugin, `Image occlusion card saved (${regions.length} regions).`, [{ file: newFile, text: imageFile.basename }]);
+    notifyCards(plugin, `Image occlusion card saved (${regions.length} regions).`, [{ file: newFile, text: imageFile.basename }]);
   };
 
   new ImageOcclusionEditor(plugin.app, plugin, imageFile, [], onSave).open();
@@ -376,7 +481,7 @@ async function createManualCard(
     plugin.app.metadataCache.offref(ref);
     plugin.updateBadge();
   });
-  notifyCardsSaved(plugin, "Card saved.", [{ file: newFile, text: authored.factText }]);
+  notifyCards(plugin, "Card saved.", [{ file: newFile, text: authored.factText }]);
 }
 
 class ManualCardModal extends Modal {

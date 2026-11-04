@@ -35,6 +35,22 @@ export function extractImagePath(link: string): string | null {
   return null;
 }
 
+/**
+ * The image a captured fact consists of, or null when the fact has any prose.
+ * Such a fact has nothing for the AI to generate from, so it always waits for
+ * its card to be written by hand. Takes the card body with its QA block removed.
+ */
+export function factImagePath(body: string): string | null {
+  let image: string | null = null;
+  for (const line of body.split("\n").map(l => l.trim()).filter(Boolean)) {
+    if (/^\(Context:/i.test(line)) continue;
+    const path = extractImagePath(line);
+    if (!path) return null;
+    image ??= path;
+  }
+  return image;
+}
+
 export function encodeImageOcclusion(imageLink: string, regions: OcclusionRegion[]): { question: string; answer: string } {
   return {
     question: imageLink.trim(),

@@ -198,6 +198,11 @@ function bindCardKeyListener(
   return cleanup;
 }
 
+/** Drop the live card key listener, for leaving a card without answering it. */
+export function releaseCardKeys(view: Component): void {
+  activeRatingKeyCleanup.get(view)?.();
+}
+
 /** Bind digit keys to select a rating grade. Returns a cleanup function. */
 function bindRatingKeys(
   view: Component,
@@ -554,12 +559,16 @@ interface RenderArgs {
  * the manual-mode counterpart of `autoSubmitOnMatch`.
  */
 async function renderManualReveal(
-  a: RenderArgs, questionMd: string, answerMd: string,
+  a: RenderArgs, question: string | HTMLElement, answerMd: string,
   opts: { input?: boolean; match?: string[]; gapTerm?: string } = {},
 ): Promise<void> {
   const { view, card, controller, answer } = a;
-  const questionSection = card.createDiv({ cls: "iris-question" });
-  await MarkdownRenderer.render(view.app, questionMd, questionSection.createDiv(), "", view);
+  if (typeof question === "string") {
+    const questionSection = card.createDiv({ cls: "iris-question" });
+    await MarkdownRenderer.render(view.app, question, questionSection.createDiv(), "", view);
+  } else {
+    card.appendChild(question);
+  }
 
   let input: HTMLInputElement | null = null;
   if (opts.input) {
@@ -1670,6 +1679,22 @@ async function renderImageOcclusion(a: RenderArgs): Promise<void> {
     img.addEventListener("load", placeOverlay, { once: true });
   }
 
+  const accepted = variant.acceptedAnswers
+    .map(decodeGapAlt)
+    .filter(d => d.term === target.label || d.term === null)
+    .map(d => d.alt);
+
+  // Without a marker there's nothing to judge a near-miss, so the answer gets
+  // self-graded like Q&A and Cloze rather than failing anything inexact.
+  if (!llmMarkingEnabled(view.plugin)) {
+    await renderManualReveal(a, questionEl, target.label, {
+      input: true,
+      match: [target.label, ...accepted],
+      gapTerm: target.label,
+    });
+    return;
+  }
+
   await renderInputCard(a, {
     questionEl,
     canonicalAnswer: target.label,
@@ -1677,24 +1702,17 @@ async function renderImageOcclusion(a: RenderArgs): Promise<void> {
     gapTerm: target.label,
     checkAnswer: (val) => {
       const norm = normalizeAnswer(val);
-      const bound = variant.acceptedAnswers
-        .map(decodeGapAlt)
-        .filter(d => d.term === target.label || d.term === null)
-        .map(d => d.alt);
-      return [target.label, ...bound].some(x => normalizeAnswer(x) === norm);
+      return [target.label, ...accepted].some(x => normalizeAnswer(x) === norm);
     },
     knownIncorrect: variant.knownIncorrect
       .map(decodeGapAlt)
       .filter(d => d.term === target.label || d.term === null)
       .map(d => d.alt),
-    llmMarker: llmMarkingEnabled(view.plugin) ? {
+    llmMarker: {
       question: `What is labeled at the occluded region of this diagram?`,
       answer: target.label,
-      acceptedAnswers: variant.acceptedAnswers
-        .map(decodeGapAlt)
-        .filter(d => d.term === target.label || d.term === null)
-        .map(d => d.alt),
-    } : undefined,
+      acceptedAnswers: accepted,
+    },
   });
 }
 

@@ -118,6 +118,14 @@
   color: var(--text-on-accent);
 }
 
+.iris-toggle:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: transparent;
+  color: var(--text-muted);
+  transform: none;
+}
+
 .iris-filter-wrap {
   position: relative;
 }
@@ -1253,35 +1261,19 @@ textarea.iris-manual-card-input {
   text-align: left;
 }
 
-button.iris-author-later {
-  padding: 4px 10px;
-  font-size: 0.85em;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-faint);
-  border: none;
-  cursor: pointer;
-}
-
-button.iris-author-later:hover {
-  color: var(--text-normal);
-  background: transparent;
-}
-
-/* Title row, matching the Create card / Edit card modal header: the same
-   form lives in both, so it should look like the same thing. */
-.iris-author-titlerow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+/* Starts at the very top of the pane rather than centring: the title is a
+   label for the screen, not part of the card being written. */
+.iris-review .iris-card.iris-author-card {
+  justify-content: flex-start;
+  padding-top: 8px;
 }
 
 .iris-author-title {
-  flex: 1;
-  font-size: var(--font-ui-large);
-  font-weight: var(--font-semibold);
+  margin-bottom: 12px;
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-medium);
   line-height: var(--line-height-tight);
+  color: var(--text-muted);
 }
 
 /* An existing question shown in place of a missing fact body. */
@@ -1441,9 +1433,16 @@ button.iris-author-option-mark.iris-author-option-correct {
   gap: 10px;
   margin-top: 18px;
   padding-top: 10px;
-  border-top: 1px solid var(--background-modifier-border);
 }
 
+.iris-author-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-left: auto;
+}
 
 select.dropdown.iris-author-type {
   height: auto;
@@ -1459,19 +1458,27 @@ select.dropdown.iris-author-type:hover {
   color: var(--text-normal);
 }
 
-button.iris-author-save {
-  margin-left: auto;
-  padding: 5px 16px;
+button.iris-author-action {
+  padding: 5px 12px;
   font-size: 0.9em;
-  color: var(--text-accent);
+  color: var(--text-muted);
   background: transparent;
   border: none;
   box-shadow: none;
   cursor: pointer;
 }
 
-button.iris-author-save:hover {
+button.iris-author-action:hover {
+  color: var(--text-normal);
   background: var(--background-modifier-hover);
+}
+
+button.iris-author-action.iris-author-save {
+  color: var(--text-accent);
+}
+
+button.iris-author-action.iris-author-confirm {
+  color: var(--text-error);
 }
 
 /* Cloze: the sentence itself is the control — words are clickable in place,
@@ -1590,29 +1597,6 @@ button.iris-cloze-reword:hover {
 }
 
 /* Edit pencil on the current review card (bottom-right corner) */
-
-/* Author-card header buttons (Later + trash) */
-.iris-author-header-btns {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.iris-author-trash {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.iris-author-trash .svg-icon {
-  width: 14px;
-  height: 14px;
-}
-
-.iris-author-trash.iris-author-trash-confirm {
-  color: var(--text-on-accent);
-  background: var(--text-error);
-}
 
 /* Waiting fact groups on the done card — pull-based introduction */
 .iris-waiting-groups {

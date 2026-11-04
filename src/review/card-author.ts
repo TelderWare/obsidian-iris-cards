@@ -91,6 +91,8 @@ interface AuthorCtx {
    * from scratch or editing an existing variant.
    */
   seedText?: string;
+  /** The image a captured fact consists of, for Image Occlusion to start from. */
+  seedImage?: TFile;
 }
 
 interface AuthorTypeDef {
@@ -160,9 +162,8 @@ function autoGrow(ta: HTMLTextAreaElement): void {
  * above the box. A label + a placeholder + a hint is three pieces of chrome
  * per field, and on a form whose whole job is "type the two halves of a card"
  * they crowd out the only thing worth looking at — the fact. `hint` survives
- * for the few fields whose syntax genuinely can't be guessed (the mistake
- * type's `{6.022|1.000..9.999}` ranges), and shows only once the field has
- * focus.
+ * for the few fields that need a word of guidance, and shows only once the
+ * field has focus.
  */
 function addTextArea(parent: HTMLElement, label: string, opts: { placeholder?: string; hint?: string; multiline?: boolean } = {}): HTMLTextAreaElement {
   const field = parent.createDiv({ cls: "iris-author-field" });
@@ -333,6 +334,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
       const footer = surface.createDiv({ cls: "iris-cloze-footer" });
       const hintEl = footer.createDiv({ cls: "iris-author-hint" });
       const rewordBtn = footer.createEl("button", { cls: "iris-cloze-reword", text: "Reword" });
+      let rewording = false;
 
       // The textarea is the single source of truth; the words are a visual
       // editor over it — clicking one inserts or removes the asterisks.
@@ -405,11 +407,17 @@ const TYPE_DEFS: AuthorTypeDef[] = [
         }
         addPlainChips(text.slice(last), last);
 
-        const gaps = parseClozeTerms(text).length;
+        refreshHint();
+      };
+
+      // The words can only be selected once they're on screen, so while the
+      // sentence is being written the hint points at how to get there.
+      const refreshHint = () => {
+        const gaps = parseClozeTerms(s.value).length;
         hintEl.setText(
-          !text.trim() ? "Write the sentence, then tap the words to hide"
-            : gaps === 0 ? "Tap a word to hide it"
-            : `${gaps} gap${gaps === 1 ? "" : "s"} — tap to add or undo`,
+          rewording ? "Press Done, then select the words to hide"
+            : gaps === 0 ? "Select a word to hide it"
+            : `${gaps} gap${gaps === 1 ? "" : "s"} — select to add or undo`,
         );
       };
 
@@ -417,7 +425,6 @@ const TYPE_DEFS: AuthorTypeDef[] = [
       // sentence is already written, so start with it on screen.
       s.value = initial?.question ?? ctx.seedText ?? "";
 
-      let rewording = false;
       const setRewording = (on: boolean) => {
         rewording = on;
         s.toggleClass("iris-hidden", !on);
@@ -426,11 +433,16 @@ const TYPE_DEFS: AuthorTypeDef[] = [
         if (on) {
           autoGrow(s);
           s.focus();
+          refreshHint();
         } else {
           renderWords();
         }
       };
-      rewordBtn.addEventListener("click", (e) => { e.preventDefault(); setRewording(!rewording); });
+      // Done on an empty box would leave nothing to select and nowhere to type.
+      rewordBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        setRewording(!rewording || !s.value.trim());
+      });
       s.addEventListener("input", () => autoGrow(s));
 
       renderWords();
@@ -441,7 +453,11 @@ const TYPE_DEFS: AuthorTypeDef[] = [
       return () => {
         const sentence = s.value.trim();
         if (!sentence) return "A sentence is required.";
-        if (parseClozeTerms(sentence).length === 0) return "At least one word needs to be hidden — tap it in the sentence.";
+        if (parseClozeTerms(sentence).length === 0) {
+          return rewording
+            ? "At least one word needs to be hidden — press Done, then select it."
+            : "At least one word needs to be hidden — select it in the sentence.";
+        }
         return { variant: mkVariant("Cloze", sentence, ""), factText: sentence };
       };
     },
@@ -727,15 +743,17 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     id: "list",
     label: "List",
     build(fields, initial, ctx) {
+      // List answers are marked item-by-item by the LLM; without that backend
+      // the review views skip List variants entirely, so say so up front rather
+      // than letting the card silently never come up — and don't describe
+      // marking that won't happen.
+      const canMark = llmMarkingEnabled(ctx.plugin);
       const prompt = addTextArea(fields, "Prompt", { placeholder: "Name the four humours." });
       const items = addTextArea(fields, "Items (one per line)", {
         multiline: true,
-        hint: "Marked unordered, so sequence doesn't matter. Each item must stand on its own.",
+        hint: canMark ? "Marked unordered, so sequence doesn't matter. Each item must stand on its own." : undefined,
       });
-      // List answers are marked item-by-item by the LLM; without that backend
-      // the review views skip List variants entirely, so say so up front rather
-      // than letting the card silently never come up.
-      if (!llmMarkingEnabled(ctx.plugin)) {
+      if (!canMark) {
         fields.createDiv({
           cls: "iris-author-hint iris-author-warn",
           text: "AI marking is off — List cards can't be marked, so they won't come up in review.",
@@ -765,9 +783,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     id: "mistake",
     label: "Correct the mistake",
     build(fields, initial) {
-      const wrong = addTextArea(fields, "Statement with the error", {
-        hint: "For a wrong number, write {correct|min..max} — e.g. {6.022|1.000..9.999} — and the distractor is randomised each review.",
-      });
+      const wrong = addTextArea(fields, "Statement with the error");
       const right = addTextArea(fields, "Corrected statement");
       if (initial) {
         wrong.value = initial.question;
@@ -817,7 +833,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     id: "occlusion",
     label: "Image occlusion",
     build(fields, initial, ctx) {
-      let imageFile: TFile | null = null;
+      let imageFile: TFile | null = ctx.seedImage ?? null;
       let regions: OcclusionRegion[] = [];
 
       // The buttons name themselves ("Choose image…"), so no label above them.
@@ -895,6 +911,16 @@ export interface CardAuthorFormOpts {
   onSave: (card: AuthoredCard) => void | Promise<void>;
   /** The fact's own sentence, for types that start from it (see AuthorCtx). */
   seedText?: string;
+  /** The fact's own image, for Image Occlusion to start from (see AuthorCtx). */
+  seedImage?: TFile;
+  /** Further footer buttons, shown beside Save in the same style. */
+  extraActions?: AuthorAction[];
+}
+
+/** A footer button. Returning a promise holds the button off until it settles. */
+export interface AuthorAction {
+  label: string;
+  onClick: (button: HTMLButtonElement) => void | Promise<void>;
 }
 
 /**
@@ -919,7 +945,12 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
   for (const def of offered) {
     typeSelect.createEl("option", { text: def.label, attr: { value: def.id } });
   }
-  const saveBtn = actions.createEl("button", { cls: "iris-author-save", text: opts.saveLabel ?? "Save card" });
+  const buttons = actions.createDiv({ cls: "iris-author-buttons" });
+  for (const action of opts.extraActions ?? []) {
+    const btn = buttons.createEl("button", { cls: "iris-author-action", text: action.label });
+    btn.addEventListener("click", () => void action.onClick(btn));
+  }
+  const saveBtn = buttons.createEl("button", { cls: "iris-author-action iris-author-save", text: opts.saveLabel ?? "Save card" });
 
   // Each type's fields are built once and kept alive behind the picker, so
   // switching type never discards anything already typed.
@@ -934,7 +965,7 @@ export function buildCardAuthorForm(container: HTMLElement, opts: CardAuthorForm
       const el = fieldsHost.createDiv();
       entry = {
         el,
-        collect: def.build(el, def.id === prefillTypeId ? opts.initial : undefined, { app: opts.app, plugin: opts.plugin, seedText: opts.seedText }),
+        collect: def.build(el, def.id === prefillTypeId ? opts.initial : undefined, { app: opts.app, plugin: opts.plugin, seedText: opts.seedText, seedImage: opts.seedImage }),
       };
       built.set(def.id, entry);
     }
