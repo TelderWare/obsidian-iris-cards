@@ -7,6 +7,8 @@ import { encodeImageOcclusion, extractImagePath, type OcclusionRegion } from "..
 import { buildQABlock } from "../types/qa-block";
 import { buildCardAuthorForm, type AuthoredCard } from "../review/card-author";
 import { getGroupOrders } from "../scheduler";
+import { encodePairs } from "../generators/pairs";
+import { parseMarkdownTable, tableRowsToPairs } from "../generators/table";
 
 // Toast that, when clicked, opens the card it announces.
 function notifyCardSaved(plugin: IrisCardsPlugin, file: TFile, message = "You'll be quizzed on this."): void {
@@ -181,6 +183,15 @@ export async function makeFlashcard(
 
   const apiKey = plugin.settings.anthropicApiKey;
   const contextLine = sourceFile ? buildContextLine(plugin, sourceFile, editor) : "";
+
+  // A Markdown table → one double-sided card per row. Parsed from the raw
+  // selection: cells keep their own markdown, and stripMarkdown would mangle
+  // escaped pipes.
+  const table = parseMarkdownTable(rawSelection);
+  if (table) {
+    await createTableCards(plugin, table, contextLine, source);
+    return;
+  }
   const cardBody = contextLine ? `${contextLine}\n\n${selection}` : selection;
 
   // Fast path: selection is already a Q:/A: pair — store it verbatim, no LLM.
@@ -251,6 +262,73 @@ export async function makeFlashcard(
     plugin.updateBadge();
   });
   notifyCardSaved(plugin, newFile);
+}
+
+// ─── Tables ─────────────────────────────────────────────────────────
+
+/**
+ * One Double-sided card per table row, sides named by column header. Unique
+ * columns (empty cells ignored) are identifying and can be shown as the
+ * prompt; columns with repeated values are answer-only. No LLM: the table is
+ * already the structure, so Eligible is locked to Pairs.
+ */
+async function createTableCards(
+  plugin: IrisCardsPlugin,
+  table: NonNullable<ReturnType<typeof parseMarkdownTable>>,
+  contextLine: string,
+  source?: { file: TFile; module?: string; date?: string },
+): Promise<void> {
+  const cardsFolder = plugin.settings.cardsFolder.trim() || "Iris Cards";
+  const identifying = table.columns.filter(c => c.identifying);
+  if (identifying.length === 0) {
+    new Notice("No column in this table has unique values, so there's nothing to prompt with. Add a column that names each row.");
+    return;
+  }
+
+  const perRow = tableRowsToPairs(table);
+  const cards = perRow.filter((f): f is NonNullable<typeof f> => f !== null);
+  const skipped = perRow.length - cards.length;
+  if (cards.length === 0) {
+    new Notice("No row has enough filled cells to make a card.");
+    return;
+  }
+
+  const groupName = cards.length > 1 ? await askGroupName(plugin, cards.length) : null;
+  const startOrder = groupName ? (getGroupOrders(plugin.app, cardsFolder).get(groupName) ?? 0) : 0;
+  let order = startOrder;
+
+  for (const fields of cards) {
+    order++;
+    const factText = fields.map(f => `${f.name}: ${f.content}`).join("\n");
+    const body = contextLine ? `${contextLine}\n\n${factText}` : factText;
+    const group = groupName ? { name: groupName, order, waiting: order > 1 } : undefined;
+    const file = await plugin.cardStore.createCard(cardsFolder, body, source, group);
+    const e = encodePairs(fields);
+    const variant = {
+      exerciseType: "Pairs" as const,
+      question: e.question,
+      answer: e.answer,
+      acceptedAnswers: [], knownIncorrect: [],
+      lastReviewed: null, suspended: false, recordMs: null, difficulty: null,
+    };
+    await plugin.app.vault.process(file, (content) => content + buildQABlock([variant], ["Pairs"]));
+    plugin.qaCache.delete(file.path);
+  }
+
+  const ref = plugin.app.metadataCache.on("resolved", () => {
+    plugin.app.metadataCache.offref(ref);
+    plugin.updateBadge();
+  });
+
+  const prompts = identifying.map(c => c.header).join(", ");
+  const answerOnly = table.columns.filter(c => !c.identifying).map(c => c.header);
+  const parts = [
+    `Made ${cards.length} card${cards.length === 1 ? "" : "s"}${groupName ? ` in "${groupName}"` : ""}.`,
+    `Prompted by: ${prompts}.`,
+  ];
+  if (answerOnly.length > 0) parts.push(`Asked only: ${answerOnly.join(", ")}.`);
+  if (skipped > 0) parts.push(`Skipped ${skipped} row${skipped === 1 ? "" : "s"} with too little filled in.`);
+  new Notice(parts.join("\n"), 8000);
 }
 
 // ─── Image Occlusion ────────────────────────────────────────────────

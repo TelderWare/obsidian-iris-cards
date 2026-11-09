@@ -13,6 +13,11 @@
  *   name:: Alanine
  *   :: Ala
  *
+ * A side written with a triple colon (`side chain::: Aliphatic`) is
+ * answer-only: it can be asked for but is never shown as the prompt. Cards
+ * made from a table use this for columns whose values repeat, since showing a
+ * shared value ("Aliphatic") can't pick out one row.
+ *
  * `::` can't collide with the QA block's own directives (Type:, Reviewed:, …),
  * which all use a single colon. Newlines inside a side are stored as <br> so
  * every side stays on one line. No A: line. Earlier v2 builds stored a JSON
@@ -23,6 +28,8 @@ export interface PairsField {
   /** Empty for an unnamed side. */
   name: string;
   content: string;
+  /** Never shown as the prompt — only asked for. */
+  answerOnly?: boolean;
 }
 
 export interface PairsResult {
@@ -31,7 +38,7 @@ export interface PairsResult {
 
 export function encodePairs(fields: PairsField[]): { question: string; answer: string } {
   const lines = fields.map(f =>
-    `${f.name.replace(/:/g, "").trim()}:: ${f.content.replace(/\r?\n/g, "<br>").trim()}`,
+    `${f.name.replace(/:/g, "").trim()}${f.answerOnly ? ":::" : "::"} ${f.content.replace(/\r?\n/g, "<br>").trim()}`,
   );
   return { question: lines.join("\n"), answer: "" };
 }
@@ -46,11 +53,12 @@ export function decodePairs(question: string): PairsResult {
 function decodePairsLines(q: string): PairsField[] {
   const fields: PairsField[] = [];
   for (const line of q.split("\n")) {
-    const m = line.match(/^([^:]*?)::\s*(.+)$/);
+    const m = line.match(/^([^:]*?)(:::?)\s*(.+)$/);
     if (!m) continue;
     const name = m[1].trim();
-    const content = m[2].replace(/<br>/g, "\n").trim();
-    if (content) fields.push({ name, content });
+    const content = m[3].replace(/<br>/g, "\n").trim();
+    if (!content) continue;
+    fields.push(m[2] === ":::" ? { name, content, answerOnly: true } : { name, content });
   }
   return fields;
 }

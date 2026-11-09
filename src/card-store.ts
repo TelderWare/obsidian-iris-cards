@@ -118,7 +118,10 @@ export class CardStore {
     group?: { name: string; order: number; waiting: boolean },
   ): Promise<TFile> {
     await this.ensureFolderExists(cardsFolder);
-    const uid = String(Date.now());
+    // Filenames are timestamps; a bulk capture (a table, many fact lines) can
+    // create several cards within one millisecond, so step past taken names.
+    let uid = Date.now();
+    while (this.app.vault.getAbstractFileByPath(normalizePath(`${cardsFolder}/${uid}.md`))) uid++;
     const targetPath = normalizePath(`${cardsFolder}/${uid}.md`);
     const newFile = await this.app.vault.create(targetPath, body);
 

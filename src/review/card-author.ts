@@ -290,7 +290,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
     id: "pairs",
     label: "Double-sided",
     build(fields, initial) {
-      const rows: { name: HTMLInputElement; content: HTMLTextAreaElement }[] = [];
+      const rows: { name: HTMLInputElement; content: HTMLTextAreaElement; answerOnly: boolean }[] = [];
       fields.createDiv({
         text: "You'll be shown one side and asked for another. Fill in a third row (or more) for extra sides. Naming sides — e.g. \"structure\" / \"name\" — makes the question say what it's asking for. Images can be pasted straight in.",
         cls: "iris-author-hint",
@@ -307,7 +307,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
         const content = row.createEl("textarea", { cls: "iris-author-input iris-author-pair-content" });
         content.rows = 1;
         content.placeholder = rows.length === 0 ? "Front" : rows.length === 1 ? "Back" : "Another side";
-        rows.push({ name, content });
+        rows.push({ name, content, answerOnly: false });
         wireAutoAdd([name, content]);
       };
       if (initial) {
@@ -317,6 +317,7 @@ const TYPE_DEFS: AuthorTypeDef[] = [
             const r = rows[rows.length - 1];
             r.name.value = f.name;
             r.content.value = f.content;
+            r.answerOnly = !!f.answerOnly;
           }
         } catch { /* vetted by editableTypeId; fall through to empty rows */ }
       }
@@ -327,7 +328,8 @@ const TYPE_DEFS: AuthorTypeDef[] = [
         for (const r of rows) {
           const name = r.name.value.trim();
           const content = r.content.value.trim();
-          if (content) complete.push({ name, content });
+          // Keep a table-made card's answer-only sides answer-only on re-save.
+          if (content) complete.push(r.answerOnly ? { name, content, answerOnly: true } : { name, content });
           else if (name) return `The "${name}" side has no content.`;
         }
         if (complete.length < 2) return "A double-sided card needs at least two sides.";

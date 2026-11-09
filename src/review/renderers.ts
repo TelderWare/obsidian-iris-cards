@@ -1714,7 +1714,10 @@ async function renderPairs(a: RenderArgs): Promise<void> {
   const rs = view.getRenderState(cardFile, variant);
   const pick = getOrInit(rs, "pairsPick", () => {
     const n = p.fields.length;
-    const show = Math.floor(Math.random() * n);
+    // Answer-only sides (non-identifying table columns) are never the prompt.
+    const showable = p.fields.map((_, i) => i).filter(i => !p.fields[i].answerOnly);
+    const pool = showable.length > 0 ? showable : p.fields.map((_, i) => i);
+    const show = pool[Math.floor(Math.random() * pool.length)];
     let ask = Math.floor(Math.random() * (n - 1));
     if (ask >= show) ask++;
     return [show, ask];
