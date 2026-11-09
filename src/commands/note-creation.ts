@@ -1,4 +1,4 @@
-import { Editor, MarkdownView, MarkdownFileInfo, Modal, TFile, Notice } from "obsidian";
+import { Editor, MarkdownView, MarkdownFileInfo, Modal, Setting, TFile, Notice } from "obsidian";
 import { stripMarkdown } from "./utils";
 import type IrisCardsPlugin from "../main";
 import { ImageOcclusionEditor } from "../widgets/image-occlusion-editor";
@@ -8,7 +8,7 @@ import { buildQABlock } from "../types/qa-block";
 import { buildCardAuthorForm, type AuthoredCard } from "../review/card-author";
 import { getGroupOrders } from "../scheduler";
 import { encodePairs } from "../generators/pairs";
-import { parseMarkdownTable, tableRowsToPairs } from "../generators/table";
+import { parseMarkdownTable, tableRowsToPairs, defaultRoles, type ColumnRole } from "../generators/table";
 
 // Toast that, when clicked, opens the card it announces.
 function notifyCardSaved(plugin: IrisCardsPlugin, file: TFile, message = "You'll be quizzed on this."): void {
@@ -266,37 +266,135 @@ export async function makeFlashcard(
 
 // ─── Tables ─────────────────────────────────────────────────────────
 
+type ParsedTableT = NonNullable<ReturnType<typeof parseMarkdownTable>>;
+
+const ROLE_LABELS: Record<ColumnRole, string> = {
+  prompt: "Prompt or answer",
+  answer: "Answer only",
+  omit: "Leave out",
+};
+
 /**
- * One Double-sided card per table row, sides named by column header. Unique
- * columns (empty cells ignored) are identifying and can be shown as the
- * prompt; columns with repeated values are answer-only. No LLM: the table is
- * already the structure, so Eligible is locked to Pairs.
+ * Set up a table capture: each column's role (defaulting to the inferred
+ * one — unique columns prompt, repeating ones are answer-only) and an
+ * optional group name. Resolves to null on Cancel or Esc: nothing is made.
+ */
+class TableCardsModal extends Modal {
+  private done = false;
+  private roles: ColumnRole[];
+
+  constructor(
+    app: IrisCardsPlugin["app"],
+    private table: ParsedTableT,
+    private existingGroups: string[],
+    private onDone: (result: { roles: ColumnRole[]; groupName: string | null } | null) => void,
+  ) {
+    super(app);
+    this.roles = defaultRoles(table);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("iris-table-cards-modal");
+    this.setTitle("Make cards from table");
+    contentEl.createEl("p", {
+      cls: "iris-group-name-desc",
+      text: "One card per row. Each review shows a prompt column and asks for another column. "
+        + "Answer-only columns are asked for but never shown. Columns whose values repeat start as answer-only.",
+    });
+
+    const status = contentEl.createEl("p", { cls: "iris-table-cards-status" });
+    let createBtn: HTMLButtonElement | null = null;
+    const refresh = () => {
+      const perRow = tableRowsToPairs(this.table, this.roles);
+      const made = perRow.filter(f => f !== null).length;
+      const skipped = perRow.length - made;
+      const anyPrompt = this.roles.includes("prompt");
+      status.setText(!anyPrompt
+        ? "Pick at least one prompt column."
+        : `${made} card${made === 1 ? "" : "s"}` + (skipped > 0
+          ? ` — ${skipped} row${skipped === 1 ? "" : "s"} skipped (no prompt cell, or fewer than two sides).`
+          : "."));
+      status.toggleClass("mod-warning", !anyPrompt || made === 0);
+      if (createBtn) {
+        createBtn.disabled = made === 0;
+        createBtn.setText(made === 0 ? "Create cards" : `Create ${made} card${made === 1 ? "" : "s"}`);
+      }
+    };
+
+    this.table.columns.forEach((col, i) => {
+      const values = this.table.rows.map(r => r[i]).filter(v => v !== "");
+      const sample = [...new Set(values)].slice(0, 3).join(", ");
+      const setting = new Setting(contentEl)
+        .setName(col.header)
+        .setDesc(`${sample}${new Set(values).size > 3 ? ", …" : ""}`
+          + (col.identifying ? "" : " — values repeat"));
+      setting.addDropdown(dd => {
+        for (const role of ["prompt", "answer", "omit"] as ColumnRole[]) dd.addOption(role, ROLE_LABELS[role]);
+        dd.setValue(this.roles[i]);
+        dd.onChange(v => { this.roles[i] = v as ColumnRole; refresh(); });
+      });
+    });
+
+    const groupInput = contentEl.createEl("input", {
+      type: "text",
+      cls: "iris-group-name-input",
+      attr: { placeholder: "Group name (optional — rows are then introduced one at a time)", list: "iris-table-group-options" },
+    });
+    const options = contentEl.createEl("datalist", { attr: { id: "iris-table-group-options" } });
+    for (const name of this.existingGroups) options.createEl("option", { attr: { value: name } });
+
+    const finish = (create: boolean) => {
+      if (this.done) return;
+      if (create && createBtn?.disabled) return;
+      this.done = true;
+      this.onDone(create ? { roles: [...this.roles], groupName: groupInput.value.trim() || null } : null);
+      this.close();
+    };
+    groupInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    });
+
+    const buttons = contentEl.createDiv({ cls: "iris-group-name-buttons" });
+    buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => finish(false));
+    createBtn = buttons.createEl("button", { cls: "mod-cta" });
+    createBtn.addEventListener("click", () => finish(true));
+    refresh();
+  }
+
+  onClose(): void {
+    if (!this.done) {
+      this.done = true;
+      this.onDone(null);
+    }
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * One Double-sided card per table row, sides named by column header, with
+ * each column's role chosen in TableCardsModal. No LLM: the table is already
+ * the structure, so Eligible is locked to Pairs.
  */
 async function createTableCards(
   plugin: IrisCardsPlugin,
-  table: NonNullable<ReturnType<typeof parseMarkdownTable>>,
+  table: ParsedTableT,
   contextLine: string,
   source?: { file: TFile; module?: string; date?: string },
 ): Promise<void> {
   const cardsFolder = plugin.settings.cardsFolder.trim() || "Iris Cards";
-  const identifying = table.columns.filter(c => c.identifying);
-  if (identifying.length === 0) {
-    new Notice("No column in this table has unique values, so there's nothing to prompt with. Add a column that names each row.");
-    return;
-  }
+  const groupOrders = getGroupOrders(plugin.app, cardsFolder);
+  const choice = await new Promise<{ roles: ColumnRole[]; groupName: string | null } | null>((resolve) => {
+    new TableCardsModal(plugin.app, table, [...groupOrders.keys()].sort(), resolve).open();
+  });
+  if (!choice) return;
+  const { roles, groupName } = choice;
 
-  const perRow = tableRowsToPairs(table);
-  const cards = perRow.filter((f): f is NonNullable<typeof f> => f !== null);
-  const skipped = perRow.length - cards.length;
-  if (cards.length === 0) {
-    new Notice("No row has enough filled cells to make a card.");
-    return;
-  }
+  const cards = tableRowsToPairs(table, roles).filter((f): f is NonNullable<typeof f> => f !== null);
+  if (cards.length === 0) return;
 
-  const groupName = cards.length > 1 ? await askGroupName(plugin, cards.length) : null;
-  const startOrder = groupName ? (getGroupOrders(plugin.app, cardsFolder).get(groupName) ?? 0) : 0;
-  let order = startOrder;
-
+  let order = groupName ? (groupOrders.get(groupName) ?? 0) : 0;
   for (const fields of cards) {
     order++;
     const factText = fields.map(f => `${f.name}: ${f.content}`).join("\n");
@@ -319,16 +417,7 @@ async function createTableCards(
     plugin.app.metadataCache.offref(ref);
     plugin.updateBadge();
   });
-
-  const prompts = identifying.map(c => c.header).join(", ");
-  const answerOnly = table.columns.filter(c => !c.identifying).map(c => c.header);
-  const parts = [
-    `Made ${cards.length} card${cards.length === 1 ? "" : "s"}${groupName ? ` in "${groupName}"` : ""}.`,
-    `Prompted by: ${prompts}.`,
-  ];
-  if (answerOnly.length > 0) parts.push(`Asked only: ${answerOnly.join(", ")}.`);
-  if (skipped > 0) parts.push(`Skipped ${skipped} row${skipped === 1 ? "" : "s"} with too little filled in.`);
-  new Notice(parts.join("\n"), 8000);
+  new Notice(`Made ${cards.length} card${cards.length === 1 ? "" : "s"}${groupName ? ` in "${groupName}"` : ""}.`);
 }
 
 // ─── Image Occlusion ────────────────────────────────────────────────

@@ -14,11 +14,23 @@ import type { PairsField } from "./pairs";
  * In the amino-acid table, Name / Three-letter / One-letter / pKa come out
  * identifying and Side chain doesn't: a review may show "Gly" and ask for the
  * name, but never shows "Aliphatic" and asks which amino acid it is.
+ *
+ * That inference is only the default. The creation dialog lets the user set
+ * each column's role — prompt, answer-only, or left out — before any card
+ * is written.
  */
+
+/** "prompt": shown or asked. "answer": only asked. "omit": not on the card. */
+export type ColumnRole = "prompt" | "answer" | "omit";
 
 export interface TableColumn {
   header: string;
+  /** Values all distinct once empty cells are ignored — the default prompt. */
   identifying: boolean;
+}
+
+export function defaultRoles(table: ParsedTable): ColumnRole[] {
+  return table.columns.map(c => c.identifying ? "prompt" : "answer");
 }
 
 export interface ParsedTable {
@@ -102,20 +114,20 @@ export function parseMarkdownTable(text: string): ParsedTable | null {
 }
 
 /**
- * The sides of each row's card. Rows that can't make a card — fewer than two
- * filled cells, or no filled identifying cell to show as the prompt — are
+ * The sides of each row's card under the given column roles. Rows that can't
+ * make a card — fewer than two sides, or no filled prompt cell to show — are
  * returned as null so the caller can report how many were skipped.
  */
-export function tableRowsToPairs(table: ParsedTable): (PairsField[] | null)[] {
+export function tableRowsToPairs(table: ParsedTable, roles: ColumnRole[] = defaultRoles(table)): (PairsField[] | null)[] {
   return table.rows.map(row => {
     const fields: PairsField[] = [];
     row.forEach((cell, i) => {
-      if (!cell) return;
-      const col = table.columns[i];
+      const role = roles[i];
+      if (!cell || role === "omit") return;
       fields.push({
-        name: col.header,
+        name: table.columns[i].header,
         content: cell,
-        ...(col.identifying ? {} : { answerOnly: true }),
+        ...(role === "answer" ? { answerOnly: true } : {}),
       });
     });
     if (fields.length < 2 || fields.every(f => f.answerOnly)) return null;

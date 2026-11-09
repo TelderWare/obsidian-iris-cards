@@ -1726,6 +1726,25 @@ input.iris-group-name-input {
   margin-top: 16px;
 }
 
+/* Table capture dialog */
+.iris-table-cards-modal .setting-item-description {
+  overflow-wrap: anywhere;
+}
+
+.iris-table-cards-modal input.iris-group-name-input {
+  margin-top: 12px;
+}
+
+.iris-table-cards-status {
+  margin: 12px 0 0;
+  font-size: 0.9em;
+  color: var(--text-muted);
+}
+
+.iris-table-cards-status.mod-warning {
+  color: var(--text-error);
+}
+
 /* Audio review — standalone process, Q&A only */
 .iris-audio-view {
   position: relative;
