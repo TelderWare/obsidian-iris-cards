@@ -7,6 +7,7 @@ import { encodeImageOcclusion, extractImagePath, type OcclusionRegion } from "..
 import { buildQABlock, parseQABlock } from "../types/qa-block";
 import { buildCardAuthorForm, type AuthoredCard } from "../review/card-author";
 import { getGroupOrders, getParentNoteName } from "../scheduler";
+import { tableToCards, type TableCard, type TableCardsResult } from "./table-cards";
 
 /** How many card links a toast lists before summarising the rest. */
 const NOTICE_MAX_LINKS = 5;
@@ -316,6 +317,14 @@ async function captureSelection(
     return;
   }
 
+  // A Markdown table → finished cards, no LLM. Checked before bulk facts:
+  // a table's `|:---|` separator row would pass for a "term: definition" line.
+  const table = tableToCards(selection);
+  if (table) {
+    await captureTable(plugin, table, contextLine, cardsFolder, source, captured);
+    return;
+  }
+
   // Bulk facts: multiple "term: definition" lines → one card per line. The
   // user names the group (or declines). In a group, only the first fact
   // starts reviewable; the rest wait to be started one at a time, so
@@ -376,6 +385,70 @@ async function captureSelection(
     plugin.updateBadge();
   });
   notifyCards(plugin, "Card saved.", [{ file: newFile, text: selection }]);
+}
+
+/**
+ * Save the cards a table produced. Like bulk facts, they can be grouped so
+ * confusable rows are introduced one at a time, and cards already made from
+ * this note are skipped, so re-capturing a table that has grown adds only
+ * what's new.
+ */
+async function captureTable(
+  plugin: IrisCardsPlugin,
+  table: TableCardsResult,
+  contextLine: string,
+  cardsFolder: string,
+  source: { file: TFile; module?: string; date?: string } | undefined,
+  captured: Map<string, TFile>,
+): Promise<void> {
+  if (table.cards.length === 0) {
+    new Notice(table.identifying.length === 0
+      ? "No cards made: no column has a different value in every row, so nothing identifies a row."
+      : "No cards made: no row has two identifying values, or anything to say about one.");
+    return;
+  }
+
+  const seen = new Set<string>();
+  const fresh: TableCard[] = [];
+  const repeats: { file: TFile; text: string }[] = [];
+  for (const card of table.cards) {
+    const key = factKey(card.factText);
+    const found = captured.get(key);
+    if (found) repeats.push({ file: found, text: card.factText });
+    else if (!seen.has(key)) fresh.push(card);
+    seen.add(key);
+  }
+  if (fresh.length === 0) {
+    notifyCards(plugin, "All of these are already cards, so none were saved again.", repeats);
+    return;
+  }
+
+  const groupName = await askGroupName(plugin, fresh.length);
+  let order = groupName ? (getGroupOrders(plugin.app, cardsFolder).get(groupName) ?? 0) : 0;
+  const saved: { file: TFile; text: string }[] = [];
+  for (const card of fresh) {
+    order++;
+    const body = contextLine ? `${contextLine}\n\n${card.factText}` : card.factText;
+    const group = groupName ? { name: groupName, order, waiting: order > 1 } : undefined;
+    const file = await plugin.cardStore.createCard(cardsFolder, body, source, group);
+    // Eligible is locked to the card's own type, so pregeneration sees it as
+    // fully covered and never spends the API on it.
+    await plugin.app.vault.process(file, (content) => content + buildQABlock([card.variant], card.eligible));
+    plugin.qaCache.delete(file.path);
+    saved.push({ file, text: card.factText });
+  }
+
+  const ref = plugin.app.metadataCache.on("resolved", () => {
+    plugin.app.metadataCache.offref(ref);
+    plugin.updateBadge();
+  });
+  const count = `${fresh.length} card${fresh.length === 1 ? "" : "s"}`;
+  const skipped = repeats.length > 0 ? ` ${repeats.length} already existed.` : "";
+  const cols = ` Identifying: ${table.identifying.join(", ") || "none"}.`
+    + (table.describing.length > 0 ? ` Asked about: ${table.describing.join(", ")}.` : "");
+  notifyCards(plugin, (groupName
+    ? `${count} saved to "${groupName}", introduced one at a time.`
+    : `${count} saved.`) + skipped + cols, saved);
 }
 
 // ─── Image Occlusion ────────────────────────────────────────────────

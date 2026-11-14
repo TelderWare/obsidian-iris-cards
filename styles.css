@@ -1261,13 +1261,6 @@ textarea.iris-manual-card-input {
   text-align: left;
 }
 
-/* Starts at the very top of the pane rather than centring: the title is a
-   label for the screen, not part of the card being written. */
-.iris-review .iris-card.iris-author-card {
-  justify-content: flex-start;
-  padding-top: 8px;
-}
-
 .iris-author-title {
   margin-bottom: 12px;
   font-size: var(--font-ui-medium);
